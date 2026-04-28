@@ -7,6 +7,7 @@ import asyncio
 import os
 import json
 import re
+import uuid
 
 TOKEN = "8690185918:AAGBg90wZ7Wyea8-JBI4aSPKPUS-OUIhuVk"
 
@@ -321,7 +322,9 @@ def normalize_history_record(record):
     else:
         fixed["days"] = str(fixed.get("days", ""))
 
-    if fixed.get("end"):
+    if fixed.get("type") == TRIP_TYPE:
+        fixed["return_date"] = ""
+    elif fixed.get("end"):
         try:
             fixed["return_date"] = get_return_to_work_date(fixed["end"])
         except:
@@ -699,6 +702,92 @@ def create_trip_docs(d):
     return paths
 
 
+def save_trip_history(d):
+    history = load_history()
+    group_id = d.get("trip_group_id") or datetime.now().strftime("%Y%m%d%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    created_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    try:
+        days = str(days_between(d.get("start", ""), d.get("end", "")))
+    except:
+        days = ""
+
+    trip_employees = []
+    for emp in d.get("employees", []):
+        trip_employees.append({
+            "fio": emp.get("fio", ""),
+            "position": trip_position_text(emp.get("pos", ""))
+        })
+
+    for emp in d.get("employees", []):
+        history.append({
+            "fio": emp.get("fio", ""),
+            "position": trip_position_text(emp.get("pos", "")),
+            "project": "",
+            "type": TRIP_TYPE,
+            "start": normalize_date(d.get("start", "")),
+            "end": normalize_date(d.get("end", "")),
+            "days": days,
+            "return_date": "",
+            "created_at": created_at,
+            "trip_group_id": group_id,
+            "trip_employees": trip_employees
+        })
+
+    save_history_full(history)
+
+
+def get_trip_groups(limit=10):
+    history = load_history()
+    groups = {}
+
+    for r in history:
+        if r.get("type") != TRIP_TYPE:
+            continue
+
+        group_id = r.get("trip_group_id") or f"{r.get('created_at','')}_{r.get('start','')}_{r.get('end','')}"
+
+        if group_id not in groups:
+            groups[group_id] = {
+                "trip_group_id": group_id,
+                "start": r.get("start", ""),
+                "end": r.get("end", ""),
+                "created_at": r.get("created_at", ""),
+                "employees": []
+            }
+
+        if r.get("trip_employees"):
+            groups[group_id]["employees"] = r.get("trip_employees", [])
+        else:
+            groups[group_id]["employees"].append({
+                "fio": r.get("fio", ""),
+                "position": r.get("position", "")
+            })
+
+    result = list(groups.values())
+    result.sort(key=lambda x: normalize_created_at(x.get("created_at", "")), reverse=True)
+
+    clean = []
+    for g in result:
+        seen = set()
+        employees = []
+        for emp in g.get("employees", []):
+            fio = emp.get("fio", "")
+            if not fio or fio in seen:
+                continue
+            seen.add(fio)
+            employees.append(emp)
+        g["employees"] = employees
+        clean.append(g)
+
+    return clean[:limit]
+
+
+def trip_repeat_keyboard(groups):
+    buttons = [str(i) for i in range(1, len(groups) + 1)] + ["🏠 Старт"]
+    return make_keyboard(buttons, cols=3)
+
+
 def finish_and_send(chat_id):
     path = create_doc(data[chat_id])
     save_history(data[chat_id])
@@ -806,7 +895,8 @@ def build_report():
         "🌴 В отпуске": [],
         "📝 В БС": [],
         "📚 В учебном отпуске": [],
-        "🏥 На больничном": []
+        "🏥 На больничном": [],
+        "✈️ В командировке": []
     }
 
     for r in history:
@@ -823,6 +913,8 @@ def build_report():
             groups["📚 В учебном отпуске"].append(r)
         elif t == SICK_LEAVE_TYPE:
             groups["🏥 На больничном"].append(r)
+        elif t == TRIP_TYPE:
+            groups["✈️ В командировке"].append(r)
 
     msg = f"📊 Отчет на {datetime.now().strftime('%d.%m.%Y')}\n\n"
 
@@ -834,7 +926,8 @@ def build_report():
 
         for i, r in enumerate(records, 1):
             msg += f"{i}. {r.get('fio')}\n"
-            msg += f"   Проект: {r.get('project', '')}\n"
+            if r.get("type") != TRIP_TYPE:
+                msg += f"   Проект: {r.get('project', '')}\n"
             msg += f"   Тип: {r.get('type')}\n"
             if r.get("periods"):
                 msg += "   Периоды:\n"
@@ -863,6 +956,9 @@ async def reminder_loop():
 
         if now_time == START_REMIND_TIME:
             for r in history:
+                if r.get("type") == TRIP_TYPE:
+                    continue
+
                 if r.get("start") == tomorrow_date:
                     key = f"start_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
 
@@ -984,8 +1080,190 @@ async def handler(m: Message):
 
     if text == "✈️ Командировка":
         data[chat_id] = {"employees": []}
-        state[chat_id] = "trip_count"
-        await m.answer("Сколько сотрудников едет в командировку? Напиши цифрой, например: 5")
+        state[chat_id] = "trip_main_menu"
+        await m.answer(
+            "Выбери действие по командировке:",
+            reply_markup=make_keyboard(["🆕 Новая командировка", "🔁 Повторить командировку", "🏠 Старт"], cols=1)
+        )
+        return
+
+    if state.get(chat_id) == "trip_main_menu":
+        if text == "🆕 Новая командировка":
+            data[chat_id] = {"employees": []}
+            state[chat_id] = "trip_count"
+            await m.answer("Сколько сотрудников едет в командировку? Напиши цифрой, например: 5", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+
+        if text == "🔁 Повторить командировку":
+            groups = get_trip_groups(limit=10)
+            if not groups:
+                await m.answer("Пока нет прошлых командировок в истории. Создай новую командировку.", reply_markup=make_keyboard(["🆕 Новая командировка", "🏠 Старт"], cols=1))
+                return
+
+            temp_search[chat_id] = groups
+            msg = "Выбери прошлую командировку для повтора:\n\n"
+            for i, g in enumerate(groups, 1):
+                msg += f"{i}. {g.get('start')} — {g.get('end')}\n"
+                employees = g.get("employees", [])
+                for emp in employees:
+                    msg += f"   - {emp.get('fio')}\n"
+                msg += "\n"
+
+            state[chat_id] = "trip_repeat_choose"
+            await m.answer(msg, reply_markup=trip_repeat_keyboard(groups))
+            return
+
+        await m.answer("Выбери действие кнопкой.", reply_markup=make_keyboard(["🆕 Новая командировка", "🔁 Повторить командировку", "🏠 Старт"], cols=1))
+        return
+
+    if state.get(chat_id) == "trip_repeat_choose":
+        if not text.isdigit():
+            await m.answer("Выбери номер прошлой командировки кнопкой.")
+            return
+
+        groups = temp_search.get(chat_id, [])
+        idx = int(text) - 1
+
+        if idx < 0 or idx >= len(groups):
+            await m.answer("Неверный номер. Выбери кнопкой.")
+            return
+
+        selected = groups[idx]
+        employees = []
+        for emp in selected.get("employees", []):
+            pos = emp.get("position", "")
+            pos = pos.replace(TRIP_REGION_SUFFIX, "").strip()
+            pos = pos.replace("Инженер-программист", "Инженер программист")
+            if pos not in ["Инженер программист", "Программист"]:
+                pos = "Инженер программист"
+            employees.append({"fio": emp.get("fio", ""), "pos": pos})
+
+        data[chat_id] = {"employees": employees}
+        state[chat_id] = "trip_repeat_edit"
+
+        msg = "Выбрана командировка как шаблон. Сейчас список сотрудников такой:\n\n"
+        for i, emp in enumerate(employees, 1):
+            msg += f"{i}. {emp.get('fio')} — {trip_position_text(emp.get('pos', ''))}\n"
+        msg += "\nМожешь добавить, удалить сотрудника или продолжить."
+
+        await m.answer(
+            msg,
+            reply_markup=make_keyboard(["➕ Добавить сотрудника", "➖ Удалить сотрудника", "✅ Продолжить", "🏠 Старт"], cols=1)
+        )
+        return
+
+    if state.get(chat_id) == "trip_repeat_edit":
+        if text == "➕ Добавить сотрудника":
+            state[chat_id] = "trip_repeat_search_emp"
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+
+        if text == "➖ Удалить сотрудника":
+            employees = data[chat_id].get("employees", [])
+            if len(employees) <= 1:
+                await m.answer("Нельзя удалить: должен остаться хотя бы 1 сотрудник.")
+                return
+
+            msg = "Кого удалить из командировки?\n\n"
+            buttons = []
+            for i, emp in enumerate(employees, 1):
+                msg += f"{i}. {emp.get('fio')}\n"
+                buttons.append(str(i))
+            buttons.append("🏠 Старт")
+
+            state[chat_id] = "trip_repeat_delete_emp"
+            await m.answer(msg, reply_markup=make_keyboard(buttons, cols=3))
+            return
+
+        if text == "✅ Продолжить":
+            if not data[chat_id].get("employees"):
+                await m.answer("Список сотрудников пустой. Добавь хотя бы одного сотрудника.")
+                return
+
+            state[chat_id] = "trip_start_date"
+            await m.answer("Введи новую дату начала командировки ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+
+        await m.answer("Выбери действие кнопкой.", reply_markup=make_keyboard(["➕ Добавить сотрудника", "➖ Удалить сотрудника", "✅ Продолжить", "🏠 Старт"], cols=1))
+        return
+
+    if state.get(chat_id) == "trip_repeat_delete_emp":
+        if not text.isdigit():
+            await m.answer("Выбери номер сотрудника кнопкой.")
+            return
+
+        employees = data[chat_id].get("employees", [])
+        idx = int(text) - 1
+
+        if idx < 0 or idx >= len(employees):
+            await m.answer("Неверный номер. Выбери кнопкой.")
+            return
+
+        removed = employees.pop(idx)
+        data[chat_id]["employees"] = employees
+        state[chat_id] = "trip_repeat_edit"
+
+        msg = f"Удален: {removed.get('fio')}\n\nТекущий список сотрудников:\n\n"
+        for i, emp in enumerate(employees, 1):
+            msg += f"{i}. {emp.get('fio')} — {trip_position_text(emp.get('pos', ''))}\n"
+        msg += "\nМожешь добавить, удалить сотрудника или продолжить."
+
+        await m.answer(
+            msg,
+            reply_markup=make_keyboard(["➕ Добавить сотрудника", "➖ Удалить сотрудника", "✅ Продолжить", "🏠 Старт"], cols=1)
+        )
+        return
+
+    if state.get(chat_id) == "trip_repeat_search_emp":
+        employees = load_employees()
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
+
+        already = {emp.get("fio") for emp in data[chat_id].get("employees", [])}
+        found = [e for e in found if e not in already]
+
+        if not found:
+            await m.answer("Сотрудник не найден или уже выбран. Напиши другую часть ФИО.")
+            return
+
+        temp_search[chat_id] = found
+        state[chat_id] = "trip_repeat_choose_emp"
+        await m.answer("Выбери сотрудника:", reply_markup=employee_keyboard(found))
+        return
+
+    if state.get(chat_id) == "trip_repeat_choose_emp":
+        if text not in temp_search.get(chat_id, []):
+            await m.answer("Выбери сотрудника только из списка кнопок.")
+            return
+
+        data[chat_id]["selected_trip_fio"] = text
+        state[chat_id] = "trip_repeat_pos"
+        await m.answer("Должность:", reply_markup=pos_menu)
+        return
+
+    if state.get(chat_id) == "trip_repeat_pos":
+        if text not in ["Инженер программист", "Программист"]:
+            await m.answer("Выбери должность из списка.")
+            return
+
+        data[chat_id]["employees"].append({
+            "fio": data[chat_id].get("selected_trip_fio", ""),
+            "pos": text
+        })
+
+        state[chat_id] = "trip_repeat_edit"
+        msg = "Сотрудник добавлен ✅\n\nТекущий список сотрудников:\n\n"
+        for i, emp in enumerate(data[chat_id].get("employees", []), 1):
+            msg += f"{i}. {emp.get('fio')} — {trip_position_text(emp.get('pos', ''))}\n"
+        msg += "\nМожешь добавить, удалить сотрудника или продолжить."
+
+        await m.answer(
+            msg,
+            reply_markup=make_keyboard(["➕ Добавить сотрудника", "➖ Удалить сотрудника", "✅ Продолжить", "🏠 Старт"], cols=1)
+        )
         return
 
     if state.get(chat_id) == "trip_count":
@@ -1011,8 +1289,11 @@ async def handler(m: Message):
             await m.answer("Напиши минимум 2 буквы фамилии или имени.")
             return
 
+        already = {emp.get("fio") for emp in data[chat_id].get("employees", [])}
+        found = [e for e in found if e not in already]
+
         if not found:
-            await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
+            await m.answer("Сотрудник не найден или уже выбран. Напиши другую часть ФИО.")
             return
 
         temp_search[chat_id] = found
@@ -1080,12 +1361,13 @@ async def handler(m: Message):
 
         data[chat_id]["end"] = normalize_date(text)
         paths = create_trip_docs(data[chat_id])
+        save_trip_history(data[chat_id])
 
         for path in paths:
             await m.answer_document(FSInputFile(path))
 
         state[chat_id] = "menu"
-        await m.answer("Командировка готова ✅", reply_markup=menu)
+        await m.answer("Командировка готова ✅ и сохранена в историю", reply_markup=menu)
         return
 
     if text == "➕ Добавить запись вручную":
@@ -1877,7 +2159,8 @@ async def handler(m: Message):
             msg += f"ФИО: {r.get('fio')}\n"
             msg += f"Тип: {r.get('type')}\n"
             msg += f"Должность: {r.get('position')}\n"
-            msg += f"Проект: {r.get('project', '')}\n"
+            if r.get("type") != TRIP_TYPE:
+                msg += f"Проект: {r.get('project', '')}\n"
 
             if r.get("periods"):
                 msg += "Периоды:\n"
