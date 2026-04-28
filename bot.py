@@ -36,6 +36,11 @@ TEMPLATES = {
     "👶 Мат помощь (ребенок)": "templates/mat_child.docx"
 }
 
+TRIP_REPORT_TEMPLATE = "templates/trip/business_trip_report.docx"
+TRIP_CERTIFICATE_TEMPLATE = "templates/trip/business_trip_certificate.docx"
+TRIP_TYPE = "✈️ Командировка"
+TRIP_REGION_SUFFIX = "подразделения по Хорезмской области"
+
 SICK_LEAVE_TYPE = "🏥 Больничный"
 BS_LEAVE_TYPES = ["📝 БС с периода по период", "📅 БС на один день"]
 BS_RANGE_TYPE = "📝 БС с периода по период"
@@ -231,6 +236,27 @@ def load_employees():
     return [p.text.strip() for p in doc.paragraphs if p.text.strip()]
 
 
+def search_employees_by_text(text, employees):
+    q = str(text).lower().strip()
+
+    if len(q) < 2:
+        return None
+
+    return [
+        e for e in employees
+        if any(part.lower().startswith(q) for part in e.split())
+    ]
+
+
+def fio_startswith_text(fio, text):
+    q = str(text).lower().strip()
+
+    if len(q) < 2:
+        return False
+
+    return any(part.lower().startswith(q) for part in str(fio).split())
+
+
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         return []
@@ -415,11 +441,10 @@ def find_active_sick_records_by_fio(fio):
 def find_active_sick_records_by_text(text):
     today = datetime.now().date()
     history = load_history()
-    q = text.lower()
     return [
         r for r in history
         if r.get("type") == SICK_LEAVE_TYPE
-        and q in r.get("fio", "").lower()
+        and fio_startswith_text(r.get("fio", ""), text)
         and is_active_record(r, today)
     ]
 
@@ -438,11 +463,10 @@ def find_active_bs_records_by_fio(fio):
 def find_active_bs_records_by_text(text):
     today = datetime.now().date()
     history = load_history()
-    q = text.lower()
     return [
         r for r in history
         if r.get("type") in BS_LEAVE_TYPES
-        and q in r.get("fio", "").lower()
+        and fio_startswith_text(r.get("fio", ""), text)
         and is_active_record(r, today)
     ]
 
@@ -598,6 +622,81 @@ def create_doc(d):
     path = os.path.join(READY_FOLDER, f"{d['fio']}.docx")
     doc.save(path)
     return path
+
+
+
+
+def month_name_capitalized(date_text):
+    return month_name(date_text).capitalize()
+
+
+def trip_position_text(position):
+    pos = str(position).strip()
+
+    if pos == "Инженер программист":
+        pos = "Инженер-программист"
+
+    if TRIP_REGION_SUFFIX.lower() not in pos.lower():
+        pos = f"{pos} {TRIP_REGION_SUFFIX}"
+
+    return pos
+
+
+def safe_filename(text):
+    text = re.sub(r"[^А-Яа-яA-Za-z0-9_ -]", "", str(text))
+    text = text.strip().replace(" ", "_")
+    return text or "file"
+
+
+def create_trip_docs(d):
+    os.makedirs(READY_FOLDER, exist_ok=True)
+
+    start = d["start"]
+    end = d["end"]
+    now_text = datetime.now().strftime("%d.%m.%Y")
+
+    start_dt = datetime.strptime(start, "%d.%m.%Y")
+    end_dt = datetime.strptime(end, "%d.%m.%Y")
+    now_dt = datetime.strptime(now_text, "%d.%m.%Y")
+
+    employees_lines = []
+    for emp in d.get("employees", []):
+        employees_lines.append(f"{emp.get('fio')} - {trip_position_text(emp.get('pos', ''))}")
+
+    common_rep = {
+        "{DAY_NOW}": now_dt.strftime("%d"),
+        "{MONTH_NOW}": month_name_capitalized(now_text),
+        "{YEAR_NOW}": str(now_dt.year),
+        "{DAY_FROM}": start_dt.strftime("%d"),
+        "{DAY_TO}": end_dt.strftime("%d"),
+        "{MONTH}": month_name_capitalized(start),
+        "{YEAR}": str(start_dt.year),
+        "{EMPLOYEES_LIST}": "\n".join(employees_lines),
+    }
+
+    report_doc = Document(TRIP_REPORT_TEMPLATE)
+    replace_text(report_doc, common_rep)
+    report_path = os.path.join(READY_FOLDER, f"Командировка_рапорт_{start_dt.strftime('%d_%m_%Y')}_{end_dt.strftime('%d_%m_%Y')}.docx")
+    report_doc.save(report_path)
+
+    paths = [report_path]
+
+    for emp in d.get("employees", []):
+        cert_doc = Document(TRIP_CERTIFICATE_TEMPLATE)
+        rep = {
+            "{FIO}": emp.get("fio", ""),
+            "{POSITION}": trip_position_text(emp.get("pos", "")),
+            "{DAY_FROM}": start_dt.strftime("%d"),
+            "{DAY_TO}": end_dt.strftime("%d"),
+            "{MONTH}": month_name_capitalized(start),
+            "{YEAR}": str(start_dt.year),
+        }
+        replace_text(cert_doc, rep)
+        cert_path = os.path.join(READY_FOLDER, f"Командировочное_удостоверение_{safe_filename(emp.get('fio', ''))}.docx")
+        cert_doc.save(cert_path)
+        paths.append(cert_path)
+
+    return paths
 
 
 def finish_and_send(chat_id):
@@ -809,6 +908,7 @@ async def reminder_loop():
 
 menu = make_keyboard([
     "📄 Создать заявление",
+    "✈️ Командировка",
     "➕ Добавить запись вручную",
     "🏥 Больничный",
     "📊 Отчет",
@@ -882,6 +982,112 @@ async def handler(m: Message):
         await m.answer("У вас доступ только к отчету.", reply_markup=report_only_menu)
         return
 
+    if text == "✈️ Командировка":
+        data[chat_id] = {"employees": []}
+        state[chat_id] = "trip_count"
+        await m.answer("Сколько сотрудников едет в командировку? Напиши цифрой, например: 5")
+        return
+
+    if state.get(chat_id) == "trip_count":
+        if not text.isdigit():
+            await m.answer("Напиши количество сотрудников цифрой.")
+            return
+
+        count = int(text)
+        if count < 1 or count > 20:
+            await m.answer("Количество должно быть от 1 до 20.")
+            return
+
+        data[chat_id] = {"employees": [], "trip_count": count, "current_employee": 1}
+        state[chat_id] = "trip_search_emp"
+        await m.answer(f"Сотрудник 1 из {count}. Напиши минимум 2 буквы фамилии или имени.")
+        return
+
+    if state.get(chat_id) == "trip_search_emp":
+        employees = load_employees()
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
+
+        if not found:
+            await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
+            return
+
+        temp_search[chat_id] = found
+        state[chat_id] = "trip_choose_emp"
+        await m.answer("Выбери сотрудника:", reply_markup=employee_keyboard(found))
+        return
+
+    if state.get(chat_id) == "trip_choose_emp":
+        if text not in temp_search.get(chat_id, []):
+            await m.answer("Выбери сотрудника только из списка кнопок.")
+            return
+
+        data[chat_id]["selected_trip_fio"] = text
+        state[chat_id] = "trip_pos"
+        await m.answer("Должность:", reply_markup=pos_menu)
+        return
+
+    if state.get(chat_id) == "trip_pos":
+        if text not in ["Инженер программист", "Программист"]:
+            await m.answer("Выбери должность из списка.")
+            return
+
+        data[chat_id]["employees"].append({
+            "fio": data[chat_id].get("selected_trip_fio", ""),
+            "pos": text
+        })
+
+        current = len(data[chat_id]["employees"])
+        total = data[chat_id].get("trip_count", 1)
+
+        if current < total:
+            next_num = current + 1
+            state[chat_id] = "trip_search_emp"
+            await m.answer(
+                f"Сотрудник {next_num} из {total}. Напиши минимум 2 буквы фамилии или имени.",
+                reply_markup=make_keyboard(["🏠 Старт"], cols=1)
+            )
+            return
+
+        state[chat_id] = "trip_start_date"
+        await m.answer("Введи дату начала командировки ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+        return
+
+    if state.get(chat_id) == "trip_start_date":
+        if not is_valid_date(text):
+            await m.answer("Ошибка. Введи дату начала в формате ДД.ММ.ГГГГ")
+            return
+
+        data[chat_id]["start"] = normalize_date(text)
+        state[chat_id] = "trip_end_date"
+        await m.answer("Введи дату конца командировки ДД.ММ.ГГГГ")
+        return
+
+    if state.get(chat_id) == "trip_end_date":
+        if not is_valid_date(text):
+            await m.answer("Ошибка. Введи дату конца в формате ДД.ММ.ГГГГ")
+            return
+
+        start_date = datetime.strptime(data[chat_id]["start"], "%d.%m.%Y")
+        end_date = datetime.strptime(normalize_date(text), "%d.%m.%Y")
+
+        if end_date < start_date:
+            await m.answer("Дата конца не может быть раньше даты начала. Введи дату конца заново.")
+            return
+
+        data[chat_id]["end"] = normalize_date(text)
+        paths = create_trip_docs(data[chat_id])
+
+        for path in paths:
+            await m.answer_document(FSInputFile(path))
+
+        state[chat_id] = "menu"
+        await m.answer("Командировка готова ✅", reply_markup=menu)
+        return
+
     if text == "➕ Добавить запись вручную":
         state[chat_id] = "manual_search_emp"
         await m.answer("Напиши ФИО или часть ФИО сотрудника")
@@ -889,7 +1095,11 @@ async def handler(m: Message):
 
     if state.get(chat_id) == "manual_search_emp":
         employees = load_employees()
-        found = [e for e in employees if text.lower() in e.lower()]
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
 
         if not found:
             await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
@@ -983,7 +1193,11 @@ async def handler(m: Message):
 
     if state.get(chat_id) == "delete_search_emp":
         employees = load_employees()
-        found = [e for e in employees if text.lower() in e.lower()]
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
 
         if not found:
             await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
@@ -1101,6 +1315,10 @@ async def handler(m: Message):
         return
 
     if state.get(chat_id) == "sick_search_emp":
+        if len(str(text).lower().strip()) < 2:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
+
         active_sick_records = find_active_sick_records_by_text(text)
 
         if len(active_sick_records) == 1:
@@ -1147,7 +1365,11 @@ async def handler(m: Message):
             return
 
         employees = load_employees()
-        found = [e for e in employees if text.lower() in e.lower()]
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
 
         if not found:
             await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
@@ -1383,7 +1605,11 @@ async def handler(m: Message):
 
     if state.get(chat_id) == "search_emp":
         employees = load_employees()
-        found = [e for e in employees if text.lower() in e.lower()]
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
 
         if not found:
             await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
@@ -1618,7 +1844,11 @@ async def handler(m: Message):
 
     if state.get(chat_id) == "history_search":
         employees = load_employees()
-        found = [e for e in employees if text.lower() in e.lower()]
+        found = search_employees_by_text(text, employees)
+
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.")
+            return
 
         if not found:
             await m.answer("Сотрудник не найден. Попробуй ещё раз.")
