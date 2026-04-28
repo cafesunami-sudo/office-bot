@@ -1678,9 +1678,6 @@ async def main():
     asyncio.create_task(reminder_loop())
     await dp.start_polling(bot)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
     
 from flask import Flask
 import threading
