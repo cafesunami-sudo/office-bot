@@ -1685,18 +1685,15 @@ import os
 
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
     return "OK"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    print(f"WEB STARTED ON PORT {port}")
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
 if __name__ == "__main__":
-    # запускаем веб
-    threading.Thread(target=run_web).start()
-
-    # запускаем бота
-    asyncio.run(main())
+    run_web()
