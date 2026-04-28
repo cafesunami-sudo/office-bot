@@ -1,0 +1,3 @@
+8690185918:AAGBg90wZ7Wyea8-JBI4aSPKPUS-OUIhuVk
+python bot.py
+
