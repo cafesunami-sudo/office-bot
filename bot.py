@@ -19,21 +19,21 @@ REPORT_ONLY_USERS = [390687401]
 REMIND_TIMES = ["09:30"]
 START_REMIND_TIME = "17:00"
 
-EMPLOYEES_FILE = r"D:\office_bot\employees\sotrudniki.docx"
-READY_FOLDER = r"D:\office_bot\ready"
-HISTORY_FILE = r"D:\office_bot\history.json"
-HOLIDAYS_FILE = r"D:\office_bot\holidays.json"
-REMINDERS_SENT_FILE = r"D:\office_bot\reminders_sent.json"
+EMPLOYEES_FILE = "employees/sotrudniki.docx"
+READY_FOLDER = "ready"
+HISTORY_FILE = "history.json"
+HOLIDAYS_FILE = "holidays.json"
+REMINDERS_SENT_FILE = "reminders_sent.json"
 
 TEMPLATES = {
-    "🌴 Полный отпуск": r"D:\office_bot\templates\otpusk_full.docx",
-    "🧩 Часть отпуска": r"D:\office_bot\templates\otpusk_part.docx",
-    "📌 Оставшийся отпуск": r"D:\office_bot\templates\otpusk_rest.docx",
-    "📚 Учебный отпуск": r"D:\office_bot\templates\study_leave.docx",
-    "📝 БС с периода по период": r"D:\office_bot\templates\bs_range.docx",
-    "📅 БС на один день": r"D:\office_bot\templates\bs_one.docx",
-    "💍 Мат помощь (свадьба)": r"D:\office_bot\templates\mat_wedding.docx",
-    "👶 Мат помощь (ребенок)": r"D:\office_bot\templates\mat_child.docx"
+    "🌴 Полный отпуск": "templates/otpusk_full.docx",
+    "🧩 Часть отпуска": "templates/otpusk_part.docx",
+    "📌 Оставшийся отпуск": "templates/otpusk_rest.docx",
+    "📚 Учебный отпуск": "templates/study_leave.docx",
+    "📝 БС с периода по период": "templates/bs_range.docx",
+    "📅 БС на один день": "templates/bs_one.docx",
+    "💍 Мат помощь (свадьба)": "templates/mat_wedding.docx",
+    "👶 Мат помощь (ребенок)": "templates/mat_child.docx"
 }
 
 SICK_LEAVE_TYPE = "🏥 Больничный"
