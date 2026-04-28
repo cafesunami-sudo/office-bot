@@ -1691,9 +1691,12 @@ def home():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"WEB STARTED ON PORT {port}")
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    app.run(host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
-    run_web()
+    # запускаем веб в отдельном потоке
+    threading.Thread(target=run_web).start()
+
+    # запускаем бота
+    asyncio.run(main())
