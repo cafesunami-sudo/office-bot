@@ -4,11 +4,17 @@ from aiogram.filters import Command
 from aiohttp import web
 from docx import Document
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import asyncio
 import os
 import json
 import re
 import uuid
+
+TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Tashkent"))
+
+def now_dt():
+    return datetime.now(TIMEZONE)
 
 TOKEN = "8690185918:AAGBg90wZ7Wyea8-JBI4aSPKPUS-OUIhuVk"
 
@@ -259,6 +265,42 @@ def fio_startswith_text(fio, text):
     return any(part.lower().startswith(q) for part in str(fio).split())
 
 
+def unique_list(values):
+    result = []
+    seen = set()
+    for value in values:
+        value = str(value).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def get_history_fios():
+    history = load_history()
+    return unique_list([r.get("fio", "") for r in history if isinstance(r, dict)])
+
+
+def get_employees_and_history_fios():
+    try:
+        employees = load_employees()
+    except Exception:
+        employees = []
+    return unique_list(employees + get_history_fios())
+
+
+def search_fios_by_text(text, fios):
+    q = str(text).lower().strip()
+    if len(q) < 2:
+        return None
+
+    return [
+        fio for fio in fios
+        if any(part.lower().startswith(q) for part in str(fio).split())
+    ]
+
+
 def load_history():
     if not os.path.exists(HISTORY_FILE):
         return []
@@ -276,7 +318,7 @@ def save_history_full(history):
 
 def normalize_created_at(value):
     if not value:
-        return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        return now_dt().strftime("%d.%m.%Y %H:%M:%S")
 
     value = str(value).strip()
     formats = ["%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"]
@@ -287,7 +329,7 @@ def normalize_created_at(value):
         except:
             pass
 
-    return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    return now_dt().strftime("%d.%m.%Y %H:%M:%S")
 
 
 def normalize_history_record(record):
@@ -432,7 +474,7 @@ def is_same_record(a, b):
 
 
 def find_active_sick_records_by_fio(fio):
-    today = datetime.now().date()
+    today = now_dt().date()
     history = load_history()
     return [
         r for r in history
@@ -443,7 +485,7 @@ def find_active_sick_records_by_fio(fio):
 
 
 def find_active_sick_records_by_text(text):
-    today = datetime.now().date()
+    today = now_dt().date()
     history = load_history()
     return [
         r for r in history
@@ -454,7 +496,7 @@ def find_active_sick_records_by_text(text):
 
 
 def find_active_bs_records_by_fio(fio):
-    today = datetime.now().date()
+    today = now_dt().date()
     history = load_history()
     return [
         r for r in history
@@ -465,7 +507,7 @@ def find_active_bs_records_by_fio(fio):
 
 
 def find_active_bs_records_by_text(text):
-    today = datetime.now().date()
+    today = now_dt().date()
     history = load_history()
     return [
         r for r in history
@@ -529,7 +571,7 @@ def build_sick_extended_record(old_record, new_start, new_end):
     new_record["days"] = str(total_days)
     new_record["return_date"] = return_date
     new_record["periods"] = periods
-    new_record["extended_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    new_record["extended_at"] = now_dt().strftime("%d.%m.%Y %H:%M:%S")
 
     return new_record
 
@@ -551,7 +593,7 @@ def build_bs_extended_record(old_record, new_start, new_end):
     new_record["days"] = str(total_days)
     new_record["return_date"] = return_date
     new_record["periods"] = periods
-    new_record["extended_at"] = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    new_record["extended_at"] = now_dt().strftime("%d.%m.%Y %H:%M:%S")
 
     return new_record
 
@@ -570,7 +612,7 @@ def save_history(d):
         "end": normalize_date(d.get("end", "")) if d.get("end") else "",
         "days": d.get("days", ""),
         "return_date": return_date,
-        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        "created_at": now_dt().strftime("%d.%m.%Y %H:%M:%S")
     }
 
     if d.get("periods"):
@@ -611,7 +653,7 @@ def create_doc(d):
         "{{FIO}}": format_fio_short(d["fio"]),
         "{{POSITION}}": d.get("pos", ""),
         "{{PROJECT}}": d.get("project", ""),
-        "{{TODAY}}": format_date_text_without_year_word(datetime.now().strftime("%d.%m.%Y"))
+        "{{TODAY}}": format_date_text_without_year_word(now_dt().strftime("%d.%m.%Y"))
     }
 
     if "start" in d and "end" in d:
@@ -657,7 +699,7 @@ def create_trip_docs(d):
 
     start = d["start"]
     end = d["end"]
-    now_text = datetime.now().strftime("%d.%m.%Y")
+    now_text = now_dt().strftime("%d.%m.%Y")
 
     start_dt = datetime.strptime(start, "%d.%m.%Y")
     end_dt = datetime.strptime(end, "%d.%m.%Y")
@@ -705,8 +747,8 @@ def create_trip_docs(d):
 
 def save_trip_history(d):
     history = load_history()
-    group_id = d.get("trip_group_id") or datetime.now().strftime("%Y%m%d%H%M%S") + "_" + str(uuid.uuid4())[:8]
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    group_id = d.get("trip_group_id") or now_dt().strftime("%Y%m%d%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    created_at = now_dt().strftime("%d.%m.%Y %H:%M:%S")
 
     try:
         days = str(days_between(d.get("start", ""), d.get("end", "")))
@@ -889,7 +931,7 @@ def is_active_record(record, today):
 
 
 def build_report():
-    today = datetime.now().date()
+    today = now_dt().date()
     history = load_history()
 
     groups = {
@@ -917,7 +959,7 @@ def build_report():
         elif t == TRIP_TYPE:
             groups["✈️ В командировке"].append(r)
 
-    msg = f"📊 Отчет на {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    msg = f"📊 Отчет на {now_dt().strftime('%d.%m.%Y')}\n\n"
 
     for title, records in groups.items():
         msg += f"{title}:\n"
@@ -945,63 +987,98 @@ def build_report():
     return msg
 
 
+def time_is_due(now_time, target_time):
+    try:
+        now_value = datetime.strptime(now_time, "%H:%M").time()
+        target_value = datetime.strptime(target_time, "%H:%M").time()
+        return now_value >= target_value
+    except:
+        return False
+
+
 async def reminder_loop():
+    print("REMINDER LOOP STARTED")
+
     while True:
-        now = datetime.now()
-        now_date = now.strftime("%d.%m.%Y")
-        now_time = now.strftime("%H:%M")
-        tomorrow_date = (now + timedelta(days=1)).strftime("%d.%m.%Y")
+        try:
+            now = now_dt()
+            now_date = now.strftime("%d.%m.%Y")
+            now_time = now.strftime("%H:%M")
+            tomorrow_date = (now + timedelta(days=1)).strftime("%d.%m.%Y")
 
-        history = load_history()
-        sent = load_sent_reminders()
+            history = load_history()
+            sent = set(load_sent_reminders())
 
-        if now_time == START_REMIND_TIME:
-            for r in history:
-                if r.get("type") == TRIP_TYPE:
+            # Напоминание за день до начала отпуска/БС/учебного/больничного.
+            # Важно: если Render перезапустился ровно в 17:00 и бот пропустил секунды,
+            # он всё равно отправит сообщение позже в этот же день, но только один раз.
+            if time_is_due(now_time, START_REMIND_TIME):
+                for r in history:
+                    if not isinstance(r, dict):
+                        continue
+
+                    if r.get("type") == TRIP_TYPE:
+                        continue
+
+                    if r.get("start") == tomorrow_date:
+                        key = f"start_{now_date}_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
+
+                        if key in sent:
+                            continue
+
+                        msg = (
+                            f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
+                            f"👤 Xodim: {r.get('fio')}\n"
+                            f"📌 Loyiha: {r.get('project', '')}\n\n"
+                            f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
+                            f"📅 Muddat: {r.get('start')} — {r.get('end')}\n"
+                            f"⏳ Davomiyligi: {r.get('days')} kun\n"
+                            f"📌 Ishga chiqish sanasi: {r.get('return_date', '')}\n\n"
+                            f"ℹ️ Xodim ertadan boshlab {start_phrase_uz(r.get('type'))}."
+                        )
+
+                        await send_group_message(msg)
+                        save_sent_reminder(key)
+                        sent.add(key)
+                        print("START REMINDER SENT:", key)
+
+            # Напоминание в день выхода на работу.
+            # Важно: отправляется после 09:30, если не было отправлено раньше.
+            for remind_time in REMIND_TIMES:
+                if not time_is_due(now_time, remind_time):
                     continue
 
-                if r.get("start") == tomorrow_date:
-                    key = f"start_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
-
-                    if key in sent:
+                for r in history:
+                    if not isinstance(r, dict):
                         continue
 
-                    msg = (
-                        f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
-                        f"👤 Xodim: {r.get('fio')}\n"
-                        f"📌 Loyiha: {r.get('project', '')}\n\n"
-                        f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
-                        f"📅 Muddat: {r.get('start')} — {r.get('end')}\n"
-                        f"⏳ Davomiyligi: {r.get('days')} kun\n"
-                        f"📌 Ishga chiqish sanasi: {r.get('return_date', '')}\n\n"
-                        f"ℹ️ Xodim ertadan boshlab {start_phrase_uz(r.get('type'))}."
-                    )
-
-                    await send_group_message(msg)
-                    save_sent_reminder(key)
-
-        if now_time in REMIND_TIMES:
-            for r in history:
-                if r.get("return_date") == now_date:
-                    key = f"return_{r.get('fio')}_{now_date}_{now_time}_{r.get('type')}"
-
-                    if key in sent:
+                    if r.get("type") == TRIP_TYPE:
                         continue
 
-                    msg = (
-                        f"✅ BUGUN ISHGA CHIQADI\n\n"
-                        f"👤 Xodim: {r.get('fio')}\n"
-                        f"📌 Loyiha: {r.get('project', '')}\n\n"
-                        f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
-                        f"📅 Ishga chiqish sanasi: {r.get('return_date', '')}\n\n"
-                        f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
-                    )
+                    if r.get("return_date") == now_date:
+                        key = f"return_{now_date}_{remind_time}_{r.get('fio')}_{r.get('type')}"
 
-                    await send_group_message(msg)
-                    save_sent_reminder(key)
+                        if key in sent:
+                            continue
+
+                        msg = (
+                            f"✅ BUGUN ISHGA CHIQADI\n\n"
+                            f"👤 Xodim: {r.get('fio')}\n"
+                            f"📌 Loyiha: {r.get('project', '')}\n\n"
+                            f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
+                            f"📅 Ishga chiqish sanasi: {r.get('return_date', '')}\n\n"
+                            f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
+                        )
+
+                        await send_group_message(msg)
+                        save_sent_reminder(key)
+                        sent.add(key)
+                        print("RETURN REMINDER SENT:", key)
+
+        except Exception as e:
+            print("REMINDER LOOP ERROR:", e)
 
         await asyncio.sleep(30)
-
 
 menu = make_keyboard([
     "📄 Создать заявление",
@@ -1475,8 +1552,8 @@ async def handler(m: Message):
         return
 
     if state.get(chat_id) == "delete_search_emp":
-        employees = load_employees()
-        found = search_employees_by_text(text, employees)
+        fios = get_employees_and_history_fios()
+        found = search_fios_by_text(text, fios)
 
         if found is None:
             await m.answer("Напиши минимум 2 буквы фамилии или имени.")
@@ -1498,6 +1575,12 @@ async def handler(m: Message):
 
         history = load_history()
         records = [r for r in history if r.get("fio") == text]
+
+        if not records:
+            records = [
+                r for r in history
+                if isinstance(r, dict) and fio_startswith_text(r.get("fio", ""), text)
+            ]
 
         if not records:
             state[chat_id] = "menu"
@@ -2119,15 +2202,15 @@ async def handler(m: Message):
         return
 
     if text == "📋 Полный список сотрудников":
-        employees = load_employees()
-        temp_search[chat_id] = employees
+        fios = get_employees_and_history_fios()
+        temp_search[chat_id] = fios
         state[chat_id] = "history_choose"
-        await m.answer("Выбери сотрудника:", reply_markup=employee_keyboard(employees))
+        await m.answer("Выбери сотрудника:", reply_markup=employee_keyboard(fios))
         return
 
     if state.get(chat_id) == "history_search":
-        employees = load_employees()
-        found = search_employees_by_text(text, employees)
+        fios = get_employees_and_history_fios()
+        found = search_fios_by_text(text, fios)
 
         if found is None:
             await m.answer("Напиши минимум 2 буквы фамилии или имени.")
@@ -2149,6 +2232,12 @@ async def handler(m: Message):
 
         history = load_history()
         records = [r for r in history if r.get("fio") == text]
+
+        if not records:
+            records = [
+                r for r in history
+                if isinstance(r, dict) and fio_startswith_text(r.get("fio", ""), text)
+            ]
 
         if not records:
             await m.answer("По этому сотруднику история пустая.", reply_markup=menu)
