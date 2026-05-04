@@ -712,16 +712,30 @@ def is_active_record(record, today):
         start = parse_date_or_none(record.get("start", ""))
         if not start:
             return False
+        if hasattr(start, "date"):
+            start = start.date()
 
-        if record.get("return_date"):
-            end = parse_date_or_none(record.get("return_date", "")) - timedelta(days=1)
-        else:
-            end = parse_date_or_none(record.get("end", ""))
-
+        end = parse_date_or_none(record.get("return_date", "") or record.get("end", ""))
         if not end:
             return False
+        if hasattr(end, "date"):
+            end = end.date()
 
-        return start <= today <= end
+        if not (start <= today <= end):
+            return False
+
+        # Если сегодня день выхода, показываем в отчете только ДО отправки сообщения
+        return_date = record.get("return_date", "")
+        today_text = today.strftime("%d.%m.%Y")
+
+        if normalize_date(return_date) == today_text:
+            sent = set(load_sent_reminders())
+            for remind_time in REMIND_TIMES:
+                key = f"return_{today_text}_{remind_time}_{record.get('fio')}_{record.get('type')}"
+                if key in sent:
+                    return False
+
+        return True
 
     except Exception:
         return False
