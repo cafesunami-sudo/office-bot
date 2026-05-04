@@ -715,7 +715,7 @@ def is_active_record(record, today):
         if hasattr(start, "date"):
             start = start.date()
 
-       end = parse_date_or_none(record.get("end", ""))
+        end = parse_date_or_none(record.get("end", ""))
         if not end:
             return False
         if hasattr(end, "date"):
@@ -724,7 +724,6 @@ def is_active_record(record, today):
         if not (start <= today <= end):
             return False
 
-        # Если сегодня день выхода, показываем в отчете только ДО отправки сообщения
         return_date = record.get("return_date", "")
         today_text = today.strftime("%d.%m.%Y")
 
@@ -734,6 +733,11 @@ def is_active_record(record, today):
                 key = f"return_{today_text}_{remind_time}_{record.get('fio')}_{record.get('type')}"
                 if key in sent:
                     return False
+
+        return True
+
+    except Exception:
+        return False
 
         return True
 
