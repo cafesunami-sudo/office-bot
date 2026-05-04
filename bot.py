@@ -707,11 +707,6 @@ def employee_keyboard(employees):
     return make_keyboard(employees + ["🏠 Старт"], cols=2)
 
 
-# ================== ГЛАВНОЕ ИСПРАВЛЕНИЕ ==================
-# Раньше отчет считал активным только до даты окончания отпуска end.
-# Теперь сотрудник считается активным до return_date включительно.
-# Поэтому если отпуск закончился 01.05.2026, а выход 04.05.2026,
-# 04.05.2026 он будет показываться в отчете.
 def is_active_record(record, today):
     try:
         start = parse_date_or_none(record.get("start", ""))
@@ -719,7 +714,7 @@ def is_active_record(record, today):
             return False
 
         if record.get("return_date"):
-            end = parse_date_or_none(record.get("return_date", ""))
+            end = parse_date_or_none(record.get("return_date", "")) - timedelta(days=1)
         else:
             end = parse_date_or_none(record.get("end", ""))
 
@@ -727,9 +722,9 @@ def is_active_record(record, today):
             return False
 
         return start <= today <= end
+
     except Exception:
         return False
-
 
 def build_report():
     today = now_dt().date()
