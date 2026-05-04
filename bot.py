@@ -11,6 +11,13 @@ import json
 import re
 import uuid
 
+try:
+    import psycopg2
+    from psycopg2.extras import Json
+except Exception:
+    psycopg2 = None
+    Json = None
+
 TIMEZONE = ZoneInfo(os.environ.get("TIMEZONE", "Asia/Tashkent"))
 
 
@@ -35,6 +42,7 @@ READY_FOLDER = "ready"
 HISTORY_FILE = "history.json"
 HOLIDAYS_FILE = "holidays.json"
 REMINDERS_SENT_FILE = "reminders_sent.json"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 TEMPLATES = {
     "🌴 Полный отпуск": "templates/otpusk_full.docx",
@@ -274,7 +282,47 @@ def unique_list(values):
     return result
 
 
-def load_history():
+def db_enabled():
+    return bool(DATABASE_URL and psycopg2 is not None)
+
+
+def get_db_conn():
+    if not db_enabled():
+        return None
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_database():
+    if not DATABASE_URL:
+        print("DATABASE_URL не указан. История будет храниться в history.json")
+        return
+
+    if psycopg2 is None:
+        print("psycopg2 не установлен. Добавь psycopg2-binary в requirements.txt")
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS history_records (
+                id SERIAL PRIMARY KEY,
+                data JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        print("PostgreSQL готов: таблица history_records проверена")
+    except Exception as e:
+        print("POSTGRES INIT ERROR:", e)
+    finally:
+        if conn:
+            conn.close()
+
+
+def load_history_from_json():
     if not os.path.exists(HISTORY_FILE):
         return []
     try:
@@ -285,9 +333,108 @@ def load_history():
         return []
 
 
-def save_history_full(history):
+def save_history_to_json(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def load_history():
+    if not db_enabled():
+        return load_history_from_json()
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT data FROM history_records ORDER BY id ASC")
+        rows = cur.fetchall()
+        cur.close()
+        return [row[0] for row in rows if isinstance(row[0], dict)]
+    except Exception as e:
+        print("POSTGRES LOAD HISTORY ERROR:", e)
+        return load_history_from_json()
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_history_full(history):
+    if not db_enabled():
+        save_history_to_json(history)
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM history_records")
+        for record in history:
+            if isinstance(record, dict):
+                cur.execute("INSERT INTO history_records (data) VALUES (%s)", (Json(record),))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print("POSTGRES SAVE HISTORY FULL ERROR:", e)
+        save_history_to_json(history)
+    finally:
+        if conn:
+            conn.close()
+
+
+def append_history_record(record):
+    if not db_enabled():
+        history = load_history_from_json()
+        history.append(record)
+        save_history_to_json(history)
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO history_records (data) VALUES (%s)", (Json(record),))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print("POSTGRES APPEND HISTORY ERROR:", e)
+        history = load_history_from_json()
+        history.append(record)
+        save_history_to_json(history)
+    finally:
+        if conn:
+            conn.close()
+
+
+def migrate_json_history_to_postgres():
+    if not db_enabled():
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM history_records")
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        conn = None
+
+        if count > 0:
+            print("PostgreSQL: история уже есть, миграция не нужна")
+            return
+
+        json_history = load_history_from_json()
+        if not json_history:
+            print("PostgreSQL: history.json пустой, переносить нечего")
+            return
+
+        save_history_full(json_history)
+        print(f"PostgreSQL: перенесено записей из history.json: {len(json_history)}")
+    except Exception as e:
+        print("POSTGRES MIGRATION ERROR:", e)
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_history_fios():
@@ -466,9 +613,7 @@ def save_history(d):
     }
     if d.get("periods"):
         record["periods"] = d.get("periods")
-    history = load_history()
-    history.append(record)
-    save_history_full(history)
+    append_history_record(record)
 
 
 def replace_text(doc, rep):
@@ -710,39 +855,34 @@ def employee_keyboard(employees):
 def is_active_record(record, today):
     try:
         start = parse_date_or_none(record.get("start", ""))
-        if not start:
-            return False
-        if hasattr(start, "date"):
-            start = start.date()
-
         end = parse_date_or_none(record.get("end", ""))
-        if not end:
-            return False
-        if hasattr(end, "date"):
-            end = end.date()
 
-        if not (start <= today <= end):
+        if not start or not end:
             return False
 
-        return_date = record.get("return_date", "")
+        # Обычная логика отчета: показываем с начала до конца отсутствия.
+        if start <= today <= end:
+            return True
+
+        # Особая логика дня выхода:
+        # если сегодня return_date, сотрудник виден в отчете только ДО отправки
+        # группового сообщения о выходе на работу. После отправки исчезает.
         today_text = today.strftime("%d.%m.%Y")
+        return_date = normalize_date(record.get("return_date", ""))
 
-        if normalize_date(return_date) == today_text:
+        if return_date == today_text:
             sent = set(load_sent_reminders())
             for remind_time in REMIND_TIMES:
                 key = f"return_{today_text}_{remind_time}_{record.get('fio')}_{record.get('type')}"
                 if key in sent:
                     return False
+            return True
 
-        return True
+        return False
 
     except Exception:
         return False
 
-        return True
-
-    except Exception:
-        return False
 
 def build_report():
     today = now_dt().date()
@@ -1739,6 +1879,8 @@ async def home(request):
 
 async def on_startup(app):
     print("BOT STARTING...")
+    init_database()
+    migrate_json_history_to_postgres()
     normalize_history_file()
     webhook_full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
     await bot.delete_webhook(drop_pending_updates=True)
