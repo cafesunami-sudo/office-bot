@@ -166,23 +166,100 @@ def get_return_to_work_date(end_date_text):
     return d.strftime("%d.%m.%Y")
 
 
-def load_sent_reminders():
+def load_sent_reminders_from_json():
     if not os.path.exists(REMINDERS_SENT_FILE):
         return []
     try:
         with open(REMINDERS_SENT_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            content = json.load(f)
+            return content if isinstance(content, list) else []
     except Exception:
         return []
 
 
-def save_sent_reminder(key):
-    sent = load_sent_reminders()
-    if key not in sent:
-        sent.append(key)
+def save_sent_reminders_to_json(sent):
     with open(REMINDERS_SENT_FILE, "w", encoding="utf-8") as f:
         json.dump(sent, f, ensure_ascii=False, indent=2)
 
+
+def load_sent_reminders():
+    if not db_enabled():
+        return load_sent_reminders_from_json()
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT key FROM sent_reminders")
+        rows = cur.fetchall()
+        cur.close()
+        return [row[0] for row in rows]
+    except Exception as e:
+        print("POSTGRES LOAD SENT REMINDERS ERROR:", e)
+        return load_sent_reminders_from_json()
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_sent_reminder(key):
+    key = str(key or "").strip()
+    if not key:
+        return
+
+    if not db_enabled():
+        sent = load_sent_reminders_from_json()
+        if key not in sent:
+            sent.append(key)
+            save_sent_reminders_to_json(sent)
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO sent_reminders (key) VALUES (%s) ON CONFLICT (key) DO NOTHING", (key,))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        print("POSTGRES SAVE SENT REMINDER ERROR:", e)
+        sent = load_sent_reminders_from_json()
+        if key not in sent:
+            sent.append(key)
+            save_sent_reminders_to_json(sent)
+    finally:
+        if conn:
+            conn.close()
+
+
+def migrate_json_reminders_to_postgres():
+    if not db_enabled():
+        return
+
+    json_sent = load_sent_reminders_from_json()
+    if not json_sent:
+        print("PostgreSQL: reminders_sent.json пустой, переносить нечего")
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        migrated = 0
+        for key in json_sent:
+            key = str(key or "").strip()
+            if not key:
+                continue
+            cur.execute("INSERT INTO sent_reminders (key) VALUES (%s) ON CONFLICT (key) DO NOTHING", (key,))
+            migrated += 1
+        conn.commit()
+        cur.close()
+        print(f"PostgreSQL: перенесено ключей reminders_sent: {migrated}")
+    except Exception as e:
+        print("POSTGRES REMINDERS MIGRATION ERROR:", e)
+    finally:
+        if conn:
+            conn.close()
 
 def month_name(date_text):
     months = {
@@ -294,7 +371,7 @@ def get_db_conn():
 
 def init_database():
     if not DATABASE_URL:
-        print("DATABASE_URL не указан. История будет храниться в history.json")
+        print("DATABASE_URL не указан. История и напоминания будут храниться в JSON-файлах")
         return
 
     if psycopg2 is None:
@@ -305,6 +382,7 @@ def init_database():
     try:
         conn = get_db_conn()
         cur = conn.cursor()
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS history_records (
                 id SERIAL PRIMARY KEY,
@@ -312,15 +390,22 @@ def init_database():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sent_reminders (
+                key TEXT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
         conn.commit()
         cur.close()
-        print("PostgreSQL готов: таблица history_records проверена")
+        print("PostgreSQL готов: history_records и sent_reminders проверены")
     except Exception as e:
         print("POSTGRES INIT ERROR:", e)
     finally:
         if conn:
             conn.close()
-
 
 def load_history_from_json():
     if not os.path.exists(HISTORY_FILE):
@@ -1881,6 +1966,7 @@ async def on_startup(app):
     print("BOT STARTING...")
     init_database()
     migrate_json_history_to_postgres()
+    migrate_json_reminders_to_postgres()
     normalize_history_file()
     webhook_full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
     await bot.delete_webhook(drop_pending_updates=True)
