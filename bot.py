@@ -715,7 +715,7 @@ def is_active_record(record, today):
         if hasattr(start, "date"):
             start = start.date()
 
-        end = parse_date_or_none(record.get("return_date", "") or record.get("end", ""))
+       end = parse_date_or_none(record.get("end", ""))
         if not end:
             return False
         if hasattr(end, "date"):
