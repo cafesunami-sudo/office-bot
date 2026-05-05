@@ -328,6 +328,64 @@ def start_phrase_uz(t):
     return "ta’tilga chiqadi"
 
 
+
+def to_latin_uz(text):
+    text = str(text or "")
+
+    # Avval ko‘p harfli birikmalar
+    replacements = [
+        ("Ў", "O‘"), ("ў", "o‘"),
+        ("Ғ", "G‘"), ("ғ", "g‘"),
+        ("Қ", "Q"), ("қ", "q"),
+        ("Ҳ", "H"), ("ҳ", "h"),
+        ("Ё", "Yo"), ("ё", "yo"),
+        ("Ю", "Yu"), ("ю", "yu"),
+        ("Я", "Ya"), ("я", "ya"),
+        ("Е", "Ye"), ("е", "e"),
+        ("Ц", "Ts"), ("ц", "ts"),
+        ("Ч", "Ch"), ("ч", "ch"),
+        ("Ш", "Sh"), ("ш", "sh"),
+        ("Щ", "Sh"), ("щ", "sh"),
+        ("Ъ", ""), ("ъ", ""),
+        ("Ь", ""), ("ь", ""),
+    ]
+
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+
+    table = str.maketrans({
+        "А": "A", "а": "a",
+        "Б": "B", "б": "b",
+        "В": "V", "в": "v",
+        "Г": "G", "г": "g",
+        "Д": "D", "д": "d",
+        "Ж": "J", "ж": "j",
+        "З": "Z", "з": "z",
+        "И": "I", "и": "i",
+        "Й": "Y", "й": "y",
+        "К": "K", "к": "k",
+        "Л": "L", "л": "l",
+        "М": "M", "м": "m",
+        "Н": "N", "н": "n",
+        "О": "O", "о": "o",
+        "П": "P", "п": "p",
+        "Р": "R", "р": "r",
+        "С": "S", "с": "s",
+        "Т": "T", "т": "t",
+        "У": "U", "у": "u",
+        "Ф": "F", "ф": "f",
+        "Х": "X", "х": "x",
+        "Ы": "I", "ы": "i",
+        "Э": "E", "э": "e",
+    })
+
+    return text.translate(table)
+
+
+def group_value(text):
+    return to_latin_uz(text)
+
+
 def load_employees():
     doc = Document(EMPLOYEES_FILE)
     return [p.text.strip() for p in doc.paragraphs if p.text.strip()]
@@ -882,9 +940,9 @@ async def notify_application_created(d):
         return_date = get_return_to_work_date(d["end"])
     msg = (
         f"📄 ARIZA TAYYORLANDI\n\n"
-        f"👤 Xodim: {d.get('fio')}\n"
-        f"💼 Lavozim: {d.get('pos', '')}\n"
-        f"📌 Loyiha: {d.get('project', '')}\n\n"
+        f"👤 Xodim: {group_value(d.get('fio'))}\n"
+        f"💼 Lavozim: {group_value(d.get('pos', ''))}\n"
+        f"📌 Loyiha: {group_value(d.get('project', ''))}\n\n"
         f"📝 Ariza turi: {type_uz(d.get('type'))}\n"
     )
     if d.get("start") and d.get("end"):
@@ -904,9 +962,9 @@ async def notify_application_created(d):
 async def notify_sick_extended(old_record, new_record, added_start, added_end):
     msg = (
         f"🏥 KASALLIK TA’TILI UZAYTIRILDI\n\n"
-        f"👤 Xodim: {new_record.get('fio')}\n"
-        f"💼 Lavozim: {new_record.get('position', '')}\n"
-        f"📌 Loyiha: {new_record.get('project', '')}\n\n"
+        f"👤 Xodim: {group_value(new_record.get('fio'))}\n"
+        f"💼 Lavozim: {group_value(new_record.get('position', ''))}\n"
+        f"📌 Loyiha: {group_value(new_record.get('project', ''))}\n\n"
         f"📅 Avvalgi muddat: {old_record.get('start')} — {old_record.get('end')}\n"
         f"➕ Qo‘shilgan muddat: {added_start} — {added_end}\n\n"
         f"📋 Umumiy davrlar:\n{format_periods(get_periods_from_record(new_record))}\n\n"
@@ -920,9 +978,9 @@ async def notify_sick_extended(old_record, new_record, added_start, added_end):
 async def notify_bs_extended(old_record, new_record, added_start, added_end):
     msg = (
         f"📝 ISH HAQI SAQLANMAGAN TA’TIL UZAYTIRILDI\n\n"
-        f"👤 Xodim: {new_record.get('fio')}\n"
-        f"💼 Lavozim: {new_record.get('position', '')}\n"
-        f"📌 Loyiha: {new_record.get('project', '')}\n\n"
+        f"👤 Xodim: {group_value(new_record.get('fio'))}\n"
+        f"💼 Lavozim: {group_value(new_record.get('position', ''))}\n"
+        f"📌 Loyiha: {group_value(new_record.get('project', ''))}\n\n"
         f"📅 Avvalgi muddat: {old_record.get('start')} — {old_record.get('end')}\n"
         f"➕ Qo‘shilgan muddat: {added_start} — {added_end}\n\n"
         f"📋 Umumiy davrlar:\n{format_periods(get_periods_from_record(new_record))}\n\n"
@@ -1055,8 +1113,8 @@ async def reminder_loop():
                             continue
                         msg = (
                             f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
-                            f"👤 Xodim: {r.get('fio')}\n"
-                            f"📌 Loyiha: {r.get('project', '')}\n\n"
+                            f"👤 Xodim: {group_value(r.get('fio'))}\n"
+                            f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
                             f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
                             f"📅 Muddat: {r.get('start')} — {r.get('end')}\n"
                             f"⏳ Davomiyligi: {r.get('days')} kun\n"
@@ -1085,8 +1143,8 @@ async def reminder_loop():
                             continue
                         msg = (
                             f"✅ BUGUN ISHGA CHIQADI\n\n"
-                            f"👤 Xodim: {r.get('fio')}\n"
-                            f"📌 Loyiha: {r.get('project', '')}\n\n"
+                            f"👤 Xodim: {group_value(r.get('fio'))}\n"
+                            f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
                             f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
                             f"📅 Ishga chiqish sanasi: {normalize_date(r.get('return_date', ''))}\n\n"
                             f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
