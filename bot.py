@@ -25,10 +25,10 @@ def now_dt():
     return datetime.now(TIMEZONE)
 
 
-TOKEN = os.environ.get("BOT_TOKEN", "8690185918:AAGBg90wZ7Wyea8-JBI4aSPKPUS-OUIhuVk")
+TOKEN = os.environ.get("BOT_TOKEN")
 
-ADMIN_CHAT_ID = 137602775
-GROUP_CHAT_ID = -1003555153586
+ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID"))
+GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID"))
 
 ADMIN_USERS = [137602775]
 REPORT_ONLY_USERS = [390687401]
