@@ -27,8 +27,8 @@ def now_dt():
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
-ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID"))
-GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID"))
+ADMIN_CHAT_ID = int(os.environ.get("ADMIN_CHAT_ID", 0))
+GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", 0))
 
 ADMIN_USERS = [137602775]
 REPORT_ONLY_USERS = [390687401]
