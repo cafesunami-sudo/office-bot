@@ -232,6 +232,51 @@ def save_sent_reminder(key):
             conn.close()
 
 
+def reserve_sent_reminder(key):
+    """
+    Ставит ключ отправки ДО отправки сообщения.
+    Это защищает от дублей после deploy/restart:
+    если ключ уже есть в PostgreSQL/JSON, сообщение повторно не отправляем.
+    """
+    key = str(key or "").strip()
+    if not key:
+        return False
+
+    if not db_enabled():
+        sent = load_sent_reminders_from_json()
+        if key in sent:
+            return False
+        sent.append(key)
+        save_sent_reminders_to_json(sent)
+        return True
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO sent_reminders (key) VALUES (%s) ON CONFLICT (key) DO NOTHING RETURNING key",
+            (key,)
+        )
+        inserted = cur.fetchone()
+        conn.commit()
+        cur.close()
+        return inserted is not None
+    except Exception as e:
+        print("POSTGRES RESERVE SENT REMINDER ERROR:", e)
+        sent = load_sent_reminders_from_json()
+        if key in sent:
+            return False
+        sent.append(key)
+        save_sent_reminders_to_json(sent)
+        return True
+    finally:
+        if conn:
+            conn.close()
+
+
+
+
 def migrate_json_reminders_to_postgres():
     if not db_enabled():
         return
@@ -1111,6 +1156,10 @@ async def reminder_loop():
                         key = f"start_{now_date}_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
                         if key in sent:
                             continue
+                        if not reserve_sent_reminder(key):
+                            sent.add(key)
+                            continue
+                        sent.add(key)
                         msg = (
                             f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
                             f"👤 Xodim: {group_value(r.get('fio'))}\n"
@@ -1122,8 +1171,6 @@ async def reminder_loop():
                             f"ℹ️ Xodim ertadan boshlab {start_phrase_uz(r.get('type'))}."
                         )
                         await send_group_message(msg)
-                        save_sent_reminder(key)
-                        sent.add(key)
                         print("START REMINDER SENT:", key)
 
             for remind_time in REMIND_TIMES:
@@ -1141,6 +1188,10 @@ async def reminder_loop():
                         key = f"return_{now_date}_{remind_time}_{r.get('fio')}_{r.get('type')}"
                         if key in sent:
                             continue
+                        if not reserve_sent_reminder(key):
+                            sent.add(key)
+                            continue
+                        sent.add(key)
                         msg = (
                             f"✅ BUGUN ISHGA CHIQADI\n\n"
                             f"👤 Xodim: {group_value(r.get('fio'))}\n"
@@ -1150,8 +1201,6 @@ async def reminder_loop():
                             f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
                         )
                         await send_group_message(msg)
-                        save_sent_reminder(key)
-                        sent.add(key)
                         print("RETURN REMINDER SENT:", key)
         except Exception as e:
             print("REMINDER LOOP ERROR:", e)
