@@ -1546,8 +1546,31 @@ def load_salary_records():
         return []
     try:
         doc = Document(SALARY_FILE)
-        lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
         records = []
+
+        # Новый файл employees/salary.docx обычно сделан таблицей:
+        # № | ФИО | Должность | сумма. Поэтому сначала читаем таблицы.
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if len(cells) < 4:
+                    continue
+                number, fio, position, salary_short = cells[0], cells[1], cells[2], cells[3]
+                if not str(number).strip().isdigit() or not fio:
+                    continue
+                records.append({
+                    "fio": fio.strip(),
+                    "position": position.strip(),
+                    "salary_short": salary_short.strip(),
+                    "salary": normalize_salary_number(salary_short),
+                })
+
+        if records:
+            return records
+
+        # Резервный вариант: если файл будет не таблицей, а обычным текстом
+        # в формате: номер / ФИО / должность / сумма.
+        lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
         i = 0
         while i < len(lines):
             if lines[i].isdigit() and i + 3 < len(lines):
