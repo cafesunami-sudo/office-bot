@@ -4,12 +4,21 @@ from aiogram.filters import Command
 from aiohttp import web
 from docx import Document
 from datetime import datetime, timedelta
+from calendar import monthrange
 from zoneinfo import ZoneInfo
 import asyncio
 import os
 import json
 import re
 import uuid
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+except Exception:
+    Workbook = None
+    Font = None
+    Alignment = None
 
 try:
     import psycopg2
@@ -1223,6 +1232,9 @@ history_menu = make_keyboard(["🔍 Поиск сотрудника", "📋 По
 pos_menu = make_keyboard(["Инженер программист", "Программист", "🏠 Старт"], cols=2)
 confirm_delete_menu = make_keyboard(["✅ Да, удалить", "❌ Нет, отменить"], cols=2)
 manual_type_menu = make_keyboard(MANUAL_TYPES + ["🏠 Старт"], cols=2)
+saved_profile_menu = make_keyboard(["✅ Да, использовать", "✏️ Изменить", "🏠 Старт"], cols=1)
+report_export_menu = make_keyboard(["📥 Excel за этот месяц", "📥 Excel за прошлый месяц", "🏠 Старт"], cols=1)
+overlap_menu = make_keyboard(["✅ Всё равно сохранить", "✏️ Изменить дату", "❌ Отмена"], cols=1)
 
 
 def find_active_sick_records_by_fio(fio):
@@ -1269,6 +1281,235 @@ def build_extended_record(old_record, new_start, new_end, force_type=None):
     return new_record
 
 
+def clean_position_for_profile(position):
+    pos = str(position or "").strip()
+    pos = pos.replace(TRIP_REGION_SUFFIX, "").replace("Инженер-программист", "Инженер программист").strip()
+    if pos in ["Инженер программист", "Программист"]:
+        return pos
+    return pos
+
+
+def get_employee_last_profile(fio):
+    records = [r for r in load_history() if isinstance(r, dict) and r.get("fio") == fio]
+    records.sort(key=lambda r: normalize_created_at(r.get("created_at", "")), reverse=True)
+    last_pos = ""
+    last_project = ""
+    for r in records:
+        if not last_pos:
+            pos = clean_position_for_profile(r.get("position", ""))
+            if pos:
+                last_pos = pos
+        if not last_project:
+            project = str(r.get("project", "")).strip()
+            if project:
+                last_project = project
+        if last_pos and last_project:
+            break
+    if not last_pos and not last_project:
+        return None
+    return {"pos": last_pos, "project": last_project}
+
+
+def profile_message(profile):
+    msg = "Найдены сохраненные данные из истории:\n\n"
+    msg += f"Должность: {profile.get('pos') or 'не указана'}\n"
+    msg += f"Проект: {profile.get('project') or 'не указан'}\n\n"
+    msg += "Использовать эти данные?"
+    return msg
+
+
+def records_overlap(start1, end1, start2, end2):
+    return start1 <= end2 and start2 <= end1
+
+
+def find_date_overlaps(fio, start_text, end_text):
+    start = parse_date_or_none(start_text)
+    end = parse_date_or_none(end_text)
+    if not start or not end:
+        return []
+    result = []
+    for r in load_history():
+        if not isinstance(r, dict):
+            continue
+        if r.get("fio") != fio:
+            continue
+        if r.get("type") not in [
+            "🌴 Полный отпуск", "🧩 Часть отпуска", "📌 Оставшийся отпуск",
+            "📚 Учебный отпуск", "📝 БС с периода по период", "📅 БС на один день",
+            SICK_LEAVE_TYPE, TRIP_TYPE,
+        ]:
+            continue
+        periods = get_periods_from_record(r)
+        if not periods and r.get("start") and r.get("end"):
+            periods = [{"start": r.get("start"), "end": r.get("end")}]
+        for p in periods:
+            old_start = parse_date_or_none(p.get("start", ""))
+            old_end = parse_date_or_none(p.get("end", ""))
+            if old_start and old_end and records_overlap(start, end, old_start, old_end):
+                result.append(r)
+                break
+    return result
+
+
+def format_overlap_warning(overlaps, new_start, new_end):
+    msg = "⚠️ У этого сотрудника уже есть запись на эти даты:\n\n"
+    for i, r in enumerate(overlaps[:5], 1):
+        msg += f"{i}. {r.get('type')}\n"
+        msg += f"   С: {r.get('start')} по {r.get('end')}\n"
+        if r.get("project"):
+            msg += f"   Проект: {r.get('project')}\n"
+        msg += "\n"
+    msg += f"Новая запись: {new_start} — {new_end}\n\n"
+    msg += "Всё равно сохранить?"
+    return msg
+
+
+def need_overlap_check(chat_id):
+    return not data.get(chat_id, {}).get("ignore_overlap")
+
+
+async def check_overlap_or_continue(m, chat_id, action_name):
+    d = data.get(chat_id, {})
+    if need_overlap_check(chat_id) and d.get("fio") and d.get("start") and d.get("end"):
+        overlaps = find_date_overlaps(d.get("fio"), d.get("start"), d.get("end"))
+        if overlaps:
+            d["pending_action"] = action_name
+            state[chat_id] = "overlap_confirm"
+            await m.answer(format_overlap_warning(overlaps, d.get("start"), d.get("end")), reply_markup=overlap_menu)
+            return False
+    return True
+
+
+async def finalize_doc_action(m, chat_id):
+    path = finish_and_send(chat_id)
+    await m.answer_document(FSInputFile(path))
+    await notify_application_created(data[chat_id])
+    data[chat_id].pop("ignore_overlap", None)
+    data[chat_id].pop("pending_action", None)
+    state[chat_id] = "menu"
+    await m.answer("Готово", reply_markup=menu)
+
+
+async def finalize_manual_action(m, chat_id):
+    save_history(data[chat_id])
+    data[chat_id].pop("ignore_overlap", None)
+    data[chat_id].pop("pending_action", None)
+    state[chat_id] = "menu"
+    await m.answer("Запись вручную добавлена ✅", reply_markup=menu)
+
+
+async def finalize_sick_action(m, chat_id):
+    save_history(data[chat_id])
+    data[chat_id].pop("ignore_overlap", None)
+    data[chat_id].pop("pending_action", None)
+    state[chat_id] = "menu"
+    await m.answer("Больничный сохранен в историю.", reply_markup=menu)
+
+
+def find_trip_overlaps(d):
+    overlaps = []
+    for emp in d.get("employees", []):
+        emp_overlaps = find_date_overlaps(emp.get("fio"), d.get("start"), d.get("end"))
+        for r in emp_overlaps:
+            overlaps.append((emp.get("fio"), r))
+    return overlaps
+
+
+def format_trip_overlap_warning(overlaps, new_start, new_end):
+    msg = "⚠️ По командировке найдены пересечения дат:\n\n"
+    for i, item in enumerate(overlaps[:8], 1):
+        fio, r = item
+        msg += f"{i}. {fio} — {r.get('type')}\n"
+        msg += f"   С: {r.get('start')} по {r.get('end')}\n\n"
+    msg += f"Новая командировка: {new_start} — {new_end}\n\n"
+    msg += "Всё равно сохранить?"
+    return msg
+
+
+async def finalize_trip_action(m, chat_id):
+    paths = create_trip_docs(data[chat_id])
+    save_trip_history(data[chat_id])
+    for path in paths:
+        await m.answer_document(FSInputFile(path))
+    data[chat_id].pop("ignore_overlap", None)
+    data[chat_id].pop("pending_action", None)
+    state[chat_id] = "menu"
+    await m.answer("Командировка готова ✅ и сохранена в историю", reply_markup=menu)
+
+
+async def run_pending_action(m, chat_id):
+    action = data.get(chat_id, {}).get("pending_action")
+    if action == "doc":
+        await finalize_doc_action(m, chat_id)
+    elif action == "manual":
+        await finalize_manual_action(m, chat_id)
+    elif action == "sick":
+        await finalize_sick_action(m, chat_id)
+    elif action == "trip":
+        await finalize_trip_action(m, chat_id)
+    else:
+        state[chat_id] = "menu"
+        await m.answer("Действие отменено.", reply_markup=menu)
+
+
+def month_bounds(offset=0):
+    today = now_dt().date()
+    year = today.year
+    month = today.month + offset
+    while month < 1:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    start = datetime(year, month, 1).date()
+    end = datetime(year, month, monthrange(year, month)[1]).date()
+    return start, end
+
+
+def create_excel_report(offset=0):
+    if Workbook is None:
+        return None
+    start_month, end_month = month_bounds(offset)
+    records = []
+    for r in load_history():
+        if not isinstance(r, dict):
+            continue
+        start = parse_date_or_none(r.get("start", ""))
+        end = parse_date_or_none(r.get("end", ""))
+        if not start or not end:
+            continue
+        if records_overlap(start, end, start_month, end_month):
+            records.append(r)
+    records.sort(key=lambda r: (parse_date_or_none(r.get("start", "")) or start_month, r.get("fio", "")))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчет"
+    title = f"Отчет за {start_month.strftime('%m.%Y')}"
+    ws.append([title])
+    ws.append([])
+    headers = ["№", "ФИО", "Должность", "Проект", "Тип", "Начало", "Конец", "Дней", "Выход", "Создан"]
+    ws.append(headers)
+    for cell in ws[3]:
+        if Font:
+            cell.font = Font(bold=True)
+        if Alignment:
+            cell.alignment = Alignment(horizontal="center")
+    for i, r in enumerate(records, 1):
+        ws.append([
+            i, r.get("fio", ""), r.get("position", ""), r.get("project", ""), r.get("type", ""),
+            r.get("start", ""), r.get("end", ""), r.get("days", ""), r.get("return_date", ""), r.get("created_at", ""),
+        ])
+    widths = [6, 32, 28, 24, 26, 14, 14, 10, 14, 22]
+    for idx, width in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + idx)].width = width
+    os.makedirs(READY_FOLDER, exist_ok=True)
+    path = os.path.join(READY_FOLDER, f"office_report_{start_month.strftime('%Y_%m')}.xlsx")
+    wb.save(path)
+    return path
+
+
 @dp.message(Command("start"))
 async def start(m: Message):
     chat_id = m.chat.id
@@ -1298,7 +1539,47 @@ async def handler(m: Message):
         return
 
     if text == "📊 Отчет":
-        await m.answer(build_report(), reply_markup=get_menu(chat_id))
+        await m.answer(build_report(), reply_markup=report_export_menu)
+        return
+
+    if text in ["📥 Excel за этот месяц", "📥 Excel за прошлый месяц"]:
+        offset = 0 if text == "📥 Excel за этот месяц" else -1
+        path = create_excel_report(offset)
+        if not path:
+            await m.answer("Для Excel-отчета нужно добавить openpyxl в requirements.txt: openpyxl", reply_markup=report_export_menu)
+            return
+        await m.answer_document(FSInputFile(path), reply_markup=report_export_menu)
+        return
+
+    if state.get(chat_id) == "overlap_confirm":
+        if text == "✅ Всё равно сохранить":
+            data[chat_id]["ignore_overlap"] = True
+            await run_pending_action(m, chat_id)
+            return
+        if text == "✏️ Изменить дату":
+            action = data.get(chat_id, {}).get("pending_action")
+            data[chat_id].pop("start", None)
+            data[chat_id].pop("end", None)
+            data[chat_id].pop("days", None)
+            data[chat_id].pop("ignore_overlap", None)
+            if action == "trip":
+                state[chat_id] = "trip_start_date"
+                await m.answer("Введи дату начала командировки ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            elif action == "sick":
+                state[chat_id] = "sick_start_date"
+                await m.answer("Введи дату начала больничного ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            elif action == "manual":
+                state[chat_id] = "manual_start"
+                await m.answer("Введи дату начала ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            else:
+                state[chat_id] = "date"
+                await m.answer("Введи дату начала ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        if text == "❌ Отмена":
+            state[chat_id] = "menu"
+            await m.answer("Сохранение отменено.", reply_markup=get_menu(chat_id))
+            return
+        await m.answer("Выбери действие кнопкой.", reply_markup=overlap_menu)
         return
 
     if is_report_only(chat_id):
@@ -1475,12 +1756,14 @@ async def handler(m: Message):
             await m.answer("Дата конца не может быть раньше даты начала. Введи дату конца заново.")
             return
         data[chat_id]["end"] = normalize_date(text)
-        paths = create_trip_docs(data[chat_id])
-        save_trip_history(data[chat_id])
-        for path in paths:
-            await m.answer_document(FSInputFile(path))
-        state[chat_id] = "menu"
-        await m.answer("Командировка готова ✅ и сохранена в историю", reply_markup=menu)
+        if need_overlap_check(chat_id):
+            overlaps = find_trip_overlaps(data[chat_id])
+            if overlaps:
+                data[chat_id]["pending_action"] = "trip"
+                state[chat_id] = "overlap_confirm"
+                await m.answer(format_trip_overlap_warning(overlaps, data[chat_id].get("start"), data[chat_id].get("end")), reply_markup=overlap_menu)
+                return
+        await finalize_trip_action(m, chat_id)
         return
 
     # ================== РУЧНАЯ ЗАПИСЬ ==================
@@ -1516,8 +1799,37 @@ async def handler(m: Message):
             await m.answer("Выбери тип записи из списка.")
             return
         data[chat_id]["type"] = text
+        profile = get_employee_last_profile(data[chat_id].get("fio"))
+        if profile:
+            data[chat_id]["saved_profile"] = profile
+            state[chat_id] = "manual_profile_confirm"
+            await m.answer(profile_message(profile), reply_markup=saved_profile_menu)
+            return
         state[chat_id] = "manual_pos"
         await m.answer("Должность:", reply_markup=pos_menu)
+        return
+
+    if state.get(chat_id) == "manual_profile_confirm":
+        if text == "✅ Да, использовать":
+            profile = data[chat_id].get("saved_profile", {})
+            data[chat_id]["pos"] = profile.get("pos", "")
+            data[chat_id]["project"] = profile.get("project", "")
+            if not data[chat_id].get("pos"):
+                state[chat_id] = "manual_pos"
+                await m.answer("Должность:", reply_markup=pos_menu)
+                return
+            if not data[chat_id].get("project"):
+                state[chat_id] = "manual_project"
+                await m.answer("Напиши название проекта")
+                return
+            state[chat_id] = "manual_start"
+            await m.answer("Введи дату начала ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        if text == "✏️ Изменить":
+            state[chat_id] = "manual_pos"
+            await m.answer("Должность:", reply_markup=pos_menu)
+            return
+        await m.answer("Выбери действие кнопкой.", reply_markup=saved_profile_menu)
         return
 
     if state.get(chat_id) == "manual_pos":
@@ -1543,9 +1855,8 @@ async def handler(m: Message):
         if data[chat_id]["type"] == "📅 БС на один день":
             data[chat_id]["end"] = normalize_date(text)
             data[chat_id]["days"] = "1"
-            save_history(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Запись вручную добавлена ✅", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "manual"):
+                await finalize_manual_action(m, chat_id)
             return
         state[chat_id] = "manual_end"
         await m.answer("Введи дату конца ДД.ММ.ГГГГ")
@@ -1562,9 +1873,8 @@ async def handler(m: Message):
             return
         data[chat_id]["end"] = normalize_date(text)
         data[chat_id]["days"] = str((end_date - start_date).days + 1)
-        save_history(data[chat_id])
-        state[chat_id] = "menu"
-        await m.answer("Запись вручную добавлена ✅", reply_markup=menu)
+        if await check_overlap_or_continue(m, chat_id, "manual"):
+            await finalize_manual_action(m, chat_id)
         return
 
     # ================== УДАЛЕНИЕ ==================
@@ -1781,9 +2091,8 @@ async def handler(m: Message):
         data[chat_id]["end"] = normalize_date(text)
         data[chat_id]["days"] = str((end_date - start_date).days + 1)
         data[chat_id]["periods"] = [{"start": data[chat_id]["start"], "end": normalize_date(text)}]
-        save_history(data[chat_id])
-        state[chat_id] = "menu"
-        await m.answer("Больничный сохранен в историю.", reply_markup=menu)
+        if await check_overlap_or_continue(m, chat_id, "sick"):
+            await finalize_sick_action(m, chat_id)
         return
 
     # ================== ПРОДЛЕНИЕ БС ==================
@@ -1865,8 +2174,41 @@ async def handler(m: Message):
                 state[chat_id] = "bs_extend_start_date"
                 await m.answer(f"✅ Найдена активная запись БС:\n\n👤 {old_record.get('fio')}\nПроект: {old_record.get('project', '')}\nС: {old_record.get('start')} по {old_record.get('end')}\nДней: {old_record.get('days')}\nВыход: {old_record.get('return_date')}\n\nТеперь введи дату, С КОТОРОЙ продлеваем БС: ДД.ММ.ГГГГ")
                 return
+        profile = get_employee_last_profile(data[chat_id].get("fio"))
+        if profile:
+            data[chat_id]["saved_profile"] = profile
+            state[chat_id] = "profile_confirm"
+            await m.answer(profile_message(profile), reply_markup=saved_profile_menu)
+            return
         state[chat_id] = "pos"
         await m.answer("Должность:", reply_markup=pos_menu)
+        return
+
+    if state.get(chat_id) == "profile_confirm":
+        if text == "✅ Да, использовать":
+            profile = data[chat_id].get("saved_profile", {})
+            data[chat_id]["pos"] = profile.get("pos", "")
+            data[chat_id]["project"] = profile.get("project", "")
+            if not data[chat_id].get("pos"):
+                state[chat_id] = "pos"
+                await m.answer("Должность:", reply_markup=pos_menu)
+                return
+            if not data[chat_id].get("project"):
+                state[chat_id] = "project"
+                await m.answer("Напиши название проекта")
+                return
+            if data[chat_id]["type"] == "👶 Мат помощь (ребенок)":
+                if await check_overlap_or_continue(m, chat_id, "doc"):
+                    await finalize_doc_action(m, chat_id)
+                return
+            state[chat_id] = "date"
+            await m.answer("Введи дату начала ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        if text == "✏️ Изменить":
+            state[chat_id] = "pos"
+            await m.answer("Должность:", reply_markup=pos_menu)
+            return
+        await m.answer("Выбери действие кнопкой.", reply_markup=saved_profile_menu)
         return
 
     if state.get(chat_id) == "pos":
@@ -1881,11 +2223,8 @@ async def handler(m: Message):
     if state.get(chat_id) == "project":
         data[chat_id]["project"] = text
         if data[chat_id]["type"] == "👶 Мат помощь (ребенок)":
-            path = finish_and_send(chat_id)
-            await m.answer_document(FSInputFile(path))
-            await notify_application_created(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Готово", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "doc"):
+                await finalize_doc_action(m, chat_id)
             return
         state[chat_id] = "date"
         await m.answer("Введи дату начала ДД.ММ.ГГГГ")
@@ -1902,21 +2241,15 @@ async def handler(m: Message):
             days = 30
             data[chat_id]["days"] = str(days)
             data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
-            path = finish_and_send(chat_id)
-            await m.answer_document(FSInputFile(path))
-            await notify_application_created(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Готово", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "doc"):
+                await finalize_doc_action(m, chat_id)
             return
         if doc_type == "🧩 Часть отпуска":
             days = 15
             data[chat_id]["days"] = str(days)
             data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
-            path = finish_and_send(chat_id)
-            await m.answer_document(FSInputFile(path))
-            await notify_application_created(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Готово", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "doc"):
+                await finalize_doc_action(m, chat_id)
             return
         if doc_type == "📚 Учебный отпуск":
             state[chat_id] = "study_end_date"
@@ -1925,21 +2258,15 @@ async def handler(m: Message):
         if doc_type == "📅 БС на один день":
             data[chat_id]["days"] = "1"
             data[chat_id]["end"] = normalize_date(text)
-            path = finish_and_send(chat_id)
-            await m.answer_document(FSInputFile(path))
-            await notify_application_created(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Готово", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "doc"):
+                await finalize_doc_action(m, chat_id)
             return
         if doc_type == "💍 Мат помощь (свадьба)":
             days = 3
             data[chat_id]["days"] = str(days)
             data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
-            path = finish_and_send(chat_id)
-            await m.answer_document(FSInputFile(path))
-            await notify_application_created(data[chat_id])
-            state[chat_id] = "menu"
-            await m.answer("Готово", reply_markup=menu)
+            if await check_overlap_or_continue(m, chat_id, "doc"):
+                await finalize_doc_action(m, chat_id)
             return
         state[chat_id] = "days"
         await m.answer("Количество дней")
@@ -1956,11 +2283,8 @@ async def handler(m: Message):
             return
         data[chat_id]["end"] = normalize_date(text)
         data[chat_id]["days"] = str((end_date - start_date).days + 1)
-        path = finish_and_send(chat_id)
-        await m.answer_document(FSInputFile(path))
-        await notify_application_created(data[chat_id])
-        state[chat_id] = "menu"
-        await m.answer("Готово", reply_markup=menu)
+        if await check_overlap_or_continue(m, chat_id, "doc"):
+            await finalize_doc_action(m, chat_id)
         return
 
     if state.get(chat_id) == "days":
@@ -1971,11 +2295,8 @@ async def handler(m: Message):
         start_date = datetime.strptime(data[chat_id]["start"], "%d.%m.%Y")
         data[chat_id]["days"] = str(days)
         data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
-        path = finish_and_send(chat_id)
-        await m.answer_document(FSInputFile(path))
-        await notify_application_created(data[chat_id])
-        state[chat_id] = "menu"
-        await m.answer("Готово", reply_markup=menu)
+        if await check_overlap_or_continue(m, chat_id, "doc"):
+            await finalize_doc_action(m, chat_id)
         return
 
     # ================== ИСТОРИЯ ==================
