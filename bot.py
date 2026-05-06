@@ -47,6 +47,7 @@ REMIND_TIMES = ["09:30"]
 START_REMIND_TIME = "17:00"
 
 EMPLOYEES_FILE = "employees/sotrudniki.docx"
+SALARY_FILE = "employees/salary.docx"
 READY_FOLDER = "ready"
 HISTORY_FILE = "history.json"
 HOLIDAYS_FILE = "holidays.json"
@@ -441,8 +442,18 @@ def group_value(text):
 
 
 def load_employees():
-    doc = Document(EMPLOYEES_FILE)
-    return [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    # Теперь основной список сотрудников берется из employees/salary.docx.
+    # Старый файл employees/sotrudniki.docx больше не нужен для поиска ФИО.
+    records = load_salary_records()
+    if records:
+        return [r.get("fio", "") for r in records if r.get("fio")]
+
+    # Резервный вариант: если salary.docx временно отсутствует, бот не падает.
+    try:
+        doc = Document(EMPLOYEES_FILE)
+        return [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    except Exception:
+        return []
 
 
 def search_employees_by_text(text, employees):
@@ -1118,6 +1129,9 @@ def build_report():
             continue
         for i, r in enumerate(records, 1):
             msg += f"{i}. {r.get('fio')}\n"
+            pos_text = display_position(r.get("fio", ""), r.get("position", ""))
+            if pos_text:
+                msg += f"   Должность: {pos_text}\n"
             if r.get("type") != TRIP_TYPE:
                 msg += f"   Проект: {r.get('project', '')}\n"
             msg += f"   Тип: {r.get('type')}\n"
@@ -1233,7 +1247,8 @@ pos_menu = make_keyboard(["Инженер программист", "Програ
 confirm_delete_menu = make_keyboard(["✅ Да, удалить", "❌ Нет, отменить"], cols=2)
 manual_type_menu = make_keyboard(MANUAL_TYPES + ["🏠 Старт"], cols=2)
 saved_profile_menu = make_keyboard(["✅ Да, использовать", "✏️ Изменить", "🏠 Старт"], cols=1)
-report_export_menu = make_keyboard(["📥 Excel за этот месяц", "📥 Excel за прошлый месяц", "🏠 Старт"], cols=1)
+report_export_menu = make_keyboard(["📥 Excel за этот месяц", "📥 Excel за прошлый месяц", "💰 Зарплаты", "🏠 Старт"], cols=1)
+salary_menu = make_keyboard(["🔍 Найти сотрудника", "📋 Весь список", "🏠 Старт"], cols=1)
 overlap_menu = make_keyboard(["✅ Всё равно сохранить", "✏️ Изменить дату", "❌ Отмена"], cols=1)
 
 
@@ -1292,17 +1307,21 @@ def clean_position_for_profile(position):
 def get_employee_last_profile(fio):
     records = [r for r in load_history() if isinstance(r, dict) and r.get("fio") == fio]
     records.sort(key=lambda r: normalize_created_at(r.get("created_at", "")), reverse=True)
-    last_pos = ""
+
+    # Должность берем из нового файла employees/salary.docx, чтобы она всегда была актуальной.
+    last_pos = clean_position_for_profile(get_position_from_salary(fio))
     last_project = ""
+
+    # Проект берем из последней истории сотрудника.
     for r in records:
-        if not last_pos:
-            pos = clean_position_for_profile(r.get("position", ""))
-            if pos:
-                last_pos = pos
         if not last_project:
             project = str(r.get("project", "")).strip()
             if project:
                 last_project = project
+        if not last_pos:
+            pos = clean_position_for_profile(r.get("position", ""))
+            if pos:
+                last_pos = pos
         if last_pos and last_project:
             break
     if not last_pos and not last_project:
@@ -1311,7 +1330,7 @@ def get_employee_last_profile(fio):
 
 
 def profile_message(profile):
-    msg = "Найдены сохраненные данные из истории:\n\n"
+    msg = "Найдены сохраненные данные:\n\n"
     msg += f"Должность: {profile.get('pos') or 'не указана'}\n"
     msg += f"Проект: {profile.get('project') or 'не указан'}\n\n"
     msg += "Использовать эти данные?"
@@ -1498,7 +1517,7 @@ def create_excel_report(offset=0):
             cell.alignment = Alignment(horizontal="center")
     for i, r in enumerate(records, 1):
         ws.append([
-            i, r.get("fio", ""), r.get("position", ""), r.get("project", ""), r.get("type", ""),
+            i, r.get("fio", ""), display_position(r.get("fio", ""), r.get("position", "")), r.get("project", ""), r.get("type", ""),
             r.get("start", ""), r.get("end", ""), r.get("days", ""), r.get("return_date", ""), r.get("created_at", ""),
         ])
     widths = [6, 32, 28, 24, 26, 14, 14, 10, 14, 22]
@@ -1508,6 +1527,100 @@ def create_excel_report(offset=0):
     path = os.path.join(READY_FOLDER, f"office_report_{start_month.strftime('%Y_%m')}.xlsx")
     wb.save(path)
     return path
+
+
+def normalize_salary_number(value):
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return ""
+    try:
+        number = float(text)
+        amount = int(number * 1000000)
+        return f"{amount:,}".replace(",", " ") + " сум"
+    except Exception:
+        return text
+
+
+def load_salary_records():
+    if not os.path.exists(SALARY_FILE):
+        return []
+    try:
+        doc = Document(SALARY_FILE)
+        lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        records = []
+        i = 0
+        while i < len(lines):
+            if lines[i].isdigit() and i + 3 < len(lines):
+                fio = lines[i + 1].strip()
+                position = lines[i + 2].strip()
+                salary_short = lines[i + 3].strip()
+                records.append({
+                    "fio": fio,
+                    "position": position,
+                    "salary_short": salary_short,
+                    "salary": normalize_salary_number(salary_short),
+                })
+                i += 4
+            else:
+                i += 1
+        return records
+    except Exception as e:
+        print("SALARY FILE READ ERROR:", e)
+        return []
+
+
+def search_salary_records_by_text(text):
+    q = str(text or "").lower().strip()
+    if len(q) < 2:
+        return None
+    return [r for r in load_salary_records() if any(part.lower().startswith(q) for part in r.get("fio", "").split())]
+
+
+def get_salary_record_by_fio(fio):
+    fio = str(fio or "").strip()
+    if not fio:
+        return None
+    for r in load_salary_records():
+        if r.get("fio") == fio:
+            return r
+    return None
+
+
+def get_position_from_salary(fio):
+    record = get_salary_record_by_fio(fio)
+    return record.get("position", "") if record else ""
+
+
+def display_position(fio, saved_position=""):
+    # В отчетах показываем должность из актуального файла salary.docx.
+    return get_position_from_salary(fio) or str(saved_position or "").strip()
+
+
+def salary_record_text(record, number=None):
+    prefix = f"{number}. " if number is not None else ""
+    return (
+        f"{prefix}{record.get('fio', '')}\n"
+        f"   Должность: {record.get('position', '')}\n"
+        f"   Зарплата: {record.get('salary', '')}\n"
+    )
+
+
+async def send_long_message(message, text, reply_markup=None):
+    max_len = 3800
+    text = str(text or "")
+    parts = []
+    while len(text) > max_len:
+        cut = text.rfind("\n", 0, max_len)
+        if cut == -1:
+            cut = max_len
+        parts.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        parts.append(text)
+    if not parts:
+        parts = [""]
+    for i, part in enumerate(parts):
+        await message.answer(part, reply_markup=reply_markup if i == len(parts) - 1 else None)
 
 
 @dp.message(Command("start"))
@@ -1549,6 +1662,57 @@ async def handler(m: Message):
             await m.answer("Для Excel-отчета нужно добавить openpyxl в requirements.txt: openpyxl", reply_markup=report_export_menu)
             return
         await m.answer_document(FSInputFile(path), reply_markup=report_export_menu)
+        return
+
+    if text == "💰 Зарплаты":
+        state[chat_id] = "salary_menu"
+        await m.answer("Выбери действие по зарплатам:", reply_markup=salary_menu)
+        return
+
+    if state.get(chat_id) == "salary_menu":
+        if text == "🔍 Найти сотрудника":
+            state[chat_id] = "salary_search"
+            await m.answer("Напиши минимум 2 буквы фамилии или имени", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        if text == "📋 Весь список":
+            records = load_salary_records()
+            if not records:
+                await m.answer(f"Файл с зарплатами не найден или пустой: {SALARY_FILE}", reply_markup=salary_menu)
+                return
+            msg = "💰 Зарплаты сотрудников:\n\n"
+            for i, record in enumerate(records, 1):
+                msg += salary_record_text(record, i) + "\n"
+            await send_long_message(m, msg, reply_markup=salary_menu)
+            return
+        await m.answer("Выбери действие кнопкой.", reply_markup=salary_menu)
+        return
+
+    if state.get(chat_id) == "salary_search":
+        found = search_salary_records_by_text(text)
+        if found is None:
+            await m.answer("Напиши минимум 2 буквы фамилии или имени.", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        if not found:
+            await m.answer("Сотрудник не найден. Напиши другую часть ФИО.", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+            return
+        temp_search[chat_id] = found
+        state[chat_id] = "salary_choose"
+        await m.answer("Выбери сотрудника:", reply_markup=employee_keyboard([r.get("fio", "") for r in found]))
+        return
+
+    if state.get(chat_id) == "salary_choose":
+        records = temp_search.get(chat_id, [])
+        selected = None
+        for record in records:
+            if record.get("fio") == text:
+                selected = record
+                break
+        if not selected:
+            await m.answer("Выбери сотрудника только из списка кнопок.", reply_markup=employee_keyboard([r.get("fio", "") for r in records]))
+            return
+        msg = "💰 Информация по зарплате:\n\n" + salary_record_text(selected)
+        state[chat_id] = "salary_menu"
+        await m.answer(msg, reply_markup=salary_menu)
         return
 
     if state.get(chat_id) == "overlap_confirm":
@@ -2344,7 +2508,7 @@ async def handler(m: Message):
             return
         msg = ""
         for r in records:
-            msg += f"ФИО: {r.get('fio')}\nТип: {r.get('type')}\nДолжность: {r.get('position')}\n"
+            msg += f"ФИО: {r.get('fio')}\nТип: {r.get('type')}\nДолжность: {display_position(r.get('fio', ''), r.get('position', ''))}\n"
             if r.get("type") != TRIP_TYPE:
                 msg += f"Проект: {r.get('project', '')}\n"
             if r.get("periods"):
