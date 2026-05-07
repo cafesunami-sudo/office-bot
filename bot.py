@@ -441,6 +441,19 @@ def group_value(text):
     return to_latin_uz(text)
 
 
+def position_group_value(position):
+    pos = str(position or "").strip()
+    normalized = pos.lower().replace("-", " ")
+    normalized = " ".join(normalized.split())
+
+    if normalized == "программист":
+        return "Dasturchi"
+    if normalized == "инженер программист":
+        return "Muhandis-dasturchi"
+
+    return group_value(pos)
+
+
 def load_employees():
     # Теперь основной список сотрудников берется из employees/salary.docx.
     # Старый файл employees/sotrudniki.docx больше не нужен для поиска ФИО.
@@ -1006,7 +1019,7 @@ async def notify_application_created(d):
     msg = (
         f"📄 ARIZA TAYYORLANDI\n\n"
         f"👤 Xodim: {group_value(d.get('fio'))}\n"
-        f"💼 Lavozim: {group_value(d.get('pos', ''))}\n"
+        f"💼 Lavozim: {position_group_value(d.get('pos', ''))}\n"
         f"📌 Loyiha: {group_value(d.get('project', ''))}\n\n"
         f"📝 Ariza turi: {type_uz(d.get('type'))}\n"
     )
@@ -1028,7 +1041,7 @@ async def notify_sick_extended(old_record, new_record, added_start, added_end):
     msg = (
         f"🏥 KASALLIK TA’TILI UZAYTIRILDI\n\n"
         f"👤 Xodim: {group_value(new_record.get('fio'))}\n"
-        f"💼 Lavozim: {group_value(new_record.get('position', ''))}\n"
+        f"💼 Lavozim: {position_group_value(new_record.get('position', ''))}\n"
         f"📌 Loyiha: {group_value(new_record.get('project', ''))}\n\n"
         f"📅 Avvalgi muddat: {old_record.get('start')} — {old_record.get('end')}\n"
         f"➕ Qo‘shilgan muddat: {added_start} — {added_end}\n\n"
@@ -1044,7 +1057,7 @@ async def notify_bs_extended(old_record, new_record, added_start, added_end):
     msg = (
         f"📝 ISH HAQI SAQLANMAGAN TA’TIL UZAYTIRILDI\n\n"
         f"👤 Xodim: {group_value(new_record.get('fio'))}\n"
-        f"💼 Lavozim: {group_value(new_record.get('position', ''))}\n"
+        f"💼 Lavozim: {position_group_value(new_record.get('position', ''))}\n"
         f"📌 Loyiha: {group_value(new_record.get('project', ''))}\n\n"
         f"📅 Avvalgi muddat: {old_record.get('start')} — {old_record.get('end')}\n"
         f"➕ Qo‘shilgan muddat: {added_start} — {added_end}\n\n"
