@@ -1256,6 +1256,8 @@ menu = make_keyboard([
 
 report_only_menu = make_keyboard(["📊 Отчет", "🏠 Старт"], cols=2)
 history_menu = make_keyboard(["🔍 Поиск сотрудника", "📋 Полный список сотрудников", "🏠 Старт"], cols=2)
+history_action_menu = make_keyboard(["✏️ Изменить дату выхода", "🏠 Старт"], cols=1)
+confirm_return_change_menu = make_keyboard(["✅ Да", "❌ Нет"], cols=2)
 pos_menu = make_keyboard(["Инженер программист", "Программист", "🏠 Старт"], cols=2)
 confirm_delete_menu = make_keyboard(["✅ Да, удалить", "❌ Нет, отменить"], cols=2)
 manual_type_menu = make_keyboard(MANUAL_TYPES + ["🏠 Старт"], cols=2)
@@ -1292,6 +1294,46 @@ def format_leave_records_for_message(records):
             msg += f" ({r.get('days')} kun)"
         msg += "\n"
     return msg
+
+
+def can_change_return_date(record):
+    if not isinstance(record, dict):
+        return False
+    if record.get("type") == TRIP_TYPE:
+        return False
+    return bool(record.get("return_date"))
+
+
+def format_return_change_records(records):
+    msg = "✏️ Qaysi yozuv bo‘yicha ishga chiqish sanasini o‘zgartiramiz?\n\n"
+    buttons = []
+    for i, r in enumerate(records, 1):
+        msg += f"{i}. {r.get('type')}\n"
+        if r.get("periods"):
+            msg += "   Периоды:\n"
+            for p in get_periods_from_record(r):
+                msg += f"   - {p.get('start')} по {p.get('end')}\n"
+        else:
+            msg += f"   С: {r.get('start')} по {r.get('end')}\n"
+        msg += f"   Текущий выход: {normalize_date(r.get('return_date', ''))}\n\n"
+        buttons.append(str(i))
+    buttons.append("🏠 Старт")
+    return msg, make_keyboard(buttons, cols=3)
+
+
+async def notify_return_date_changed(old_record, new_record, reason="bayram / qo‘shimcha dam olish kuni"):
+    msg = (
+        f"📢 ISHGA CHIQISH SANASI O‘ZGARTIRILDI\n\n"
+        f"👤 Xodim: {group_value(new_record.get('fio'))}\n"
+        f"💼 Lavozim: {position_group_value(new_record.get('position', ''))}\n"
+        f"📌 Loyiha: {group_value(new_record.get('project', ''))}\n\n"
+        f"📝 Ta’til turi: {type_uz(new_record.get('type'))}\n"
+        f"📅 Ta’til muddati: {new_record.get('start')} — {new_record.get('end')}\n"
+        f"📌 Avvalgi ishga chiqish sanasi: {normalize_date(old_record.get('return_date', ''))}\n"
+        f"✅ Yangi ishga chiqish sanasi: {normalize_date(new_record.get('return_date', ''))}\n\n"
+        f"ℹ️ Sabab: {reason}."
+    )
+    await send_group_message(msg)
 
 
 def build_extended_record(old_record, new_start, new_end, force_type=None):
@@ -2561,8 +2603,91 @@ async def handler(m: Message):
             if r.get("return_date"):
                 msg += f"Выход на работу: {r.get('return_date')}\n"
             msg += f"Создан: {r.get('created_at')}\n\n"
-        await m.answer(msg, reply_markup=menu)
+
+        changeable_records = [r for r in records if can_change_return_date(r)]
+        data[chat_id] = {"history_fio": text, "history_records": records, "return_change_records": changeable_records}
+        state[chat_id] = "history_action"
+        if changeable_records:
+            await m.answer(msg, reply_markup=history_action_menu)
+        else:
+            await m.answer(msg, reply_markup=menu)
+            state[chat_id] = "menu"
+        return
+
+    if state.get(chat_id) == "history_action":
+        if text == "✏️ Изменить дату выхода":
+            records = data.get(chat_id, {}).get("return_change_records", [])
+            if not records:
+                state[chat_id] = "menu"
+                await m.answer("По этому сотруднику нет записи с датой выхода.", reply_markup=menu)
+                return
+            msg, kb = format_return_change_records(records)
+            state[chat_id] = "return_change_choose_record"
+            await m.answer(msg, reply_markup=kb)
+            return
+        await m.answer("Выбери действие кнопкой.", reply_markup=history_action_menu)
+        return
+
+    if state.get(chat_id) == "return_change_choose_record":
+        if not text.isdigit():
+            await m.answer("Выбери номер записи кнопкой.")
+            return
+        idx = int(text) - 1
+        records = data.get(chat_id, {}).get("return_change_records", [])
+        if idx < 0 or idx >= len(records):
+            await m.answer("Неверный номер записи.")
+            return
+        record = records[idx]
+        data[chat_id]["return_change_record"] = record
+        msg = (
+            f"Изменить дату выхода по этой записи?\n\n"
+            f"👤 {record.get('fio')}\n"
+            f"Тип: {record.get('type')}\n"
+            f"С: {record.get('start')} по {record.get('end')}\n"
+            f"Текущий выход: {normalize_date(record.get('return_date', ''))}"
+        )
+        state[chat_id] = "return_change_confirm"
+        await m.answer(msg, reply_markup=confirm_return_change_menu)
+        return
+
+    if state.get(chat_id) == "return_change_confirm":
+        if text == "❌ Нет":
+            state[chat_id] = "menu"
+            await m.answer("Изменение отменено.", reply_markup=menu)
+            return
+        if text != "✅ Да":
+            await m.answer("Выбери: ✅ Да или ❌ Нет", reply_markup=confirm_return_change_menu)
+            return
+        state[chat_id] = "return_change_new_date"
+        await m.answer("Введи новую дату выхода на работу ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
+        return
+
+    if state.get(chat_id) == "return_change_new_date":
+        if not is_valid_date(text):
+            await m.answer("Ошибка. Введи дату выхода в формате ДД.ММ.ГГГГ")
+            return
+        old_record = data.get(chat_id, {}).get("return_change_record")
+        if not old_record:
+            state[chat_id] = "menu"
+            await m.answer("Запись не найдена. Начни заново через историю.", reply_markup=menu)
+            return
+        old_return = normalize_date(old_record.get("return_date", ""))
+        new_return = normalize_date(text)
+        if old_return == new_return:
+            state[chat_id] = "menu"
+            await m.answer("Дата выхода не изменилась.", reply_markup=menu)
+            return
+        new_record = dict(old_record)
+        new_record["return_date"] = new_return
+        new_record["return_changed_at"] = now_dt().strftime("%d.%m.%Y %H:%M:%S")
+        new_record["return_change_reason"] = "bayram / qo‘shimcha dam olish kuni"
+        update_history_record(old_record, new_record)
+        await notify_return_date_changed(old_record, new_record)
         state[chat_id] = "menu"
+        await m.answer(
+            f"Дата выхода изменена ✅\n\n👤 {new_record.get('fio')}\nБыло: {old_return}\nСтало: {new_return}",
+            reply_markup=menu
+        )
         return
 
     await m.answer("Выбери действие из меню.", reply_markup=get_menu(chat_id))
