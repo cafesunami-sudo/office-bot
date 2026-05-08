@@ -1304,21 +1304,41 @@ def can_change_return_date(record):
     return bool(record.get("return_date"))
 
 
-def format_return_change_records(records):
-    msg = "✏️ Qaysi yozuv bo‘yicha ishga chiqish sanasini o‘zgartiramiz?\n\n"
-    buttons = []
-    for i, r in enumerate(records, 1):
-        msg += f"{i}. {r.get('type')}\n"
-        if r.get("periods"):
-            msg += "   Периоды:\n"
-            for p in get_periods_from_record(r):
-                msg += f"   - {p.get('start')} по {p.get('end')}\n"
-        else:
-            msg += f"   С: {r.get('start')} по {r.get('end')}\n"
-        msg += f"   Текущий выход: {normalize_date(r.get('return_date', ''))}\n\n"
-        buttons.append(str(i))
-    buttons.append("🏠 Старт")
-    return msg, make_keyboard(buttons, cols=3)
+def choose_return_change_record(records):
+    records = [r for r in records if isinstance(r, dict)]
+    if not records:
+        return None
+
+    today = now_dt().date()
+
+    def sort_key(record):
+        start = parse_date_or_none(record.get("start", ""))
+        end = parse_date_or_none(record.get("end", ""))
+        return_date = parse_date_or_none(record.get("return_date", ""))
+        created = normalize_created_at(record.get("created_at", ""))
+
+        # Сначала берем текущую/актуальную запись: отпуск идет сейчас
+        # или дата выхода еще впереди. Старые отпуска не мешают.
+        active_score = 0
+        if start and return_date and start <= today <= return_date:
+            active_score = 2
+        elif return_date and return_date >= today:
+            active_score = 1
+
+        return (active_score, return_date or end or start or today, created)
+
+    records.sort(key=sort_key, reverse=True)
+    return records[0]
+
+
+def return_change_prompt(record):
+    return (
+        f"Введите новую дату выхода на работу ДД.ММ.ГГГГ\n\n"
+        f"👤 {record.get('fio')}\n"
+        f"Тип: {record.get('type')}\n"
+        f"С: {record.get('start')} по {record.get('end')}\n"
+        f"Текущий выход: {normalize_date(record.get('return_date', ''))}"
+    )
 
 
 async def notify_return_date_changed(old_record, new_record, reason="bayram / qo‘shimcha dam olish kuni"):
@@ -2617,49 +2637,16 @@ async def handler(m: Message):
     if state.get(chat_id) == "history_action":
         if text == "✏️ Изменить дату выхода":
             records = data.get(chat_id, {}).get("return_change_records", [])
-            if not records:
+            record = choose_return_change_record(records)
+            if not record:
                 state[chat_id] = "menu"
                 await m.answer("По этому сотруднику нет записи с датой выхода.", reply_markup=menu)
                 return
-            msg, kb = format_return_change_records(records)
-            state[chat_id] = "return_change_choose_record"
-            await m.answer(msg, reply_markup=kb)
+            data[chat_id]["return_change_record"] = record
+            state[chat_id] = "return_change_new_date"
+            await m.answer(return_change_prompt(record), reply_markup=make_keyboard(["🏠 Старт"], cols=1))
             return
         await m.answer("Выбери действие кнопкой.", reply_markup=history_action_menu)
-        return
-
-    if state.get(chat_id) == "return_change_choose_record":
-        if not text.isdigit():
-            await m.answer("Выбери номер записи кнопкой.")
-            return
-        idx = int(text) - 1
-        records = data.get(chat_id, {}).get("return_change_records", [])
-        if idx < 0 or idx >= len(records):
-            await m.answer("Неверный номер записи.")
-            return
-        record = records[idx]
-        data[chat_id]["return_change_record"] = record
-        msg = (
-            f"Изменить дату выхода по этой записи?\n\n"
-            f"👤 {record.get('fio')}\n"
-            f"Тип: {record.get('type')}\n"
-            f"С: {record.get('start')} по {record.get('end')}\n"
-            f"Текущий выход: {normalize_date(record.get('return_date', ''))}"
-        )
-        state[chat_id] = "return_change_confirm"
-        await m.answer(msg, reply_markup=confirm_return_change_menu)
-        return
-
-    if state.get(chat_id) == "return_change_confirm":
-        if text == "❌ Нет":
-            state[chat_id] = "menu"
-            await m.answer("Изменение отменено.", reply_markup=menu)
-            return
-        if text != "✅ Да":
-            await m.answer("Выбери: ✅ Да или ❌ Нет", reply_markup=confirm_return_change_menu)
-            return
-        state[chat_id] = "return_change_new_date"
-        await m.answer("Введи новую дату выхода на работу ДД.ММ.ГГГГ", reply_markup=make_keyboard(["🏠 Старт"], cols=1))
         return
 
     if state.get(chat_id) == "return_change_new_date":
@@ -2680,7 +2667,7 @@ async def handler(m: Message):
         new_record = dict(old_record)
         new_record["return_date"] = new_return
         new_record["return_changed_at"] = now_dt().strftime("%d.%m.%Y %H:%M:%S")
-        new_record["return_change_reason"] = "bayram / qo‘shimcha dam olish kuni"
+        new_record["return_change_reason"] = "дополнительный выходной / праздничный день"
         update_history_record(old_record, new_record)
         await notify_return_date_changed(old_record, new_record)
         state[chat_id] = "menu"
