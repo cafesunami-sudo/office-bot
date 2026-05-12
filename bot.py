@@ -2681,7 +2681,7 @@ async def handler(m: Message):
 
 
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://office-bot-wdp8.onrender.com")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://office-bot-production-c91b.up.railway.app")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "office_bot_secret")
 
 
