@@ -749,27 +749,23 @@ def normalize_history_record(record):
     else:
         fixed["days"] = str(fixed.get("days", ""))
 
-    # ВАЖНО: если дата выхода была изменена вручную через историю,
-    # не пересчитываем её заново от даты окончания отпуска.
-    # Иначе после перезапуска/Railway deploy normalize_history_file() снова вернёт старую дату.
-    manual_return_date = normalize_date(fixed.get("return_date", ""))
     if fixed.get("type") == TRIP_TYPE:
         fixed["return_date"] = ""
-    elif fixed.get("return_changed_at") and manual_return_date:
-        fixed["return_date"] = manual_return_date
+    elif fixed.get("return_changed_at") and fixed.get("return_date"):
+        # Если дату выхода меняли вручную через историю, не пересчитываем ее заново
+        # при перезапуске/деплое. Иначе бот возвращал старую дату из end.
+        fixed["return_date"] = normalize_date(fixed.get("return_date", ""))
     elif fixed.get("end"):
         try:
             fixed["return_date"] = get_return_to_work_date(fixed["end"])
         except Exception:
-            fixed["return_date"] = manual_return_date
+            fixed["return_date"] = normalize_date(fixed.get("return_date", ""))
     else:
-        fixed["return_date"] = manual_return_date
+        fixed["return_date"] = normalize_date(fixed.get("return_date", ""))
 
     fixed["created_at"] = normalize_created_at(fixed.get("created_at"))
     if fixed.get("extended_at"):
         fixed["extended_at"] = normalize_created_at(fixed.get("extended_at"))
-    if fixed.get("return_changed_at"):
-        fixed["return_changed_at"] = normalize_created_at(fixed.get("return_changed_at"))
     return fixed
 
 
