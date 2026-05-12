@@ -2,3 +2,4 @@ aiogram
 python-docx
 flask
 openpyxl
+psycopg2-binary
