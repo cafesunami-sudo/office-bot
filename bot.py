@@ -751,10 +751,6 @@ def normalize_history_record(record):
 
     if fixed.get("type") == TRIP_TYPE:
         fixed["return_date"] = ""
-    elif fixed.get("return_changed_at") and fixed.get("return_date"):
-        # Если дату выхода меняли вручную через историю, не пересчитываем ее заново
-        # при перезапуске/деплое. Иначе бот возвращал старую дату из end.
-        fixed["return_date"] = normalize_date(fixed.get("return_date", ""))
     elif fixed.get("end"):
         try:
             fixed["return_date"] = get_return_to_work_date(fixed["end"])
@@ -1038,6 +1034,40 @@ async def notify_application_created(d):
     if return_date:
         msg += f"📌 Ishga chiqish sanasi: {return_date}\n"
     msg += "\n✅ Ariza bot orqali shakllantirildi."
+    await send_group_message(msg)
+
+
+async def notify_sick_created(d):
+    """
+    Уведомление в группу при создании новой записи больничного.
+    История уже сохраняется через save_history(), поэтому запись не пропадает при Railway deploy.
+    """
+    return_date = ""
+    if d.get("end"):
+        return_date = get_return_to_work_date(d["end"])
+
+    pos_text = d.get("pos") or display_position(d.get("fio", ""), d.get("position", ""))
+
+    msg = (
+        f"🏥 KASALLIK TA’TILI QAYD ETILDI\n\n"
+        f"👤 Xodim: {group_value(d.get('fio'))}\n"
+        f"💼 Lavozim: {position_group_value(pos_text)}\n"
+        f"📌 Loyiha: {group_value(d.get('project', ''))}\n\n"
+        f"📝 Ta’til turi: {type_uz(d.get('type'))}\n"
+    )
+
+    if d.get("start") and d.get("end"):
+        msg += f"📅 Muddat: {d.get('start')} — {d.get('end')}\n"
+    elif d.get("start"):
+        msg += f"📅 Sana: {d.get('start')}\n"
+
+    if d.get("days"):
+        msg += f"⏳ Davomiyligi: {d.get('days')} kun\n"
+
+    if return_date:
+        msg += f"📌 Ishga chiqish sanasi: {return_date}\n"
+
+    msg += "\n✅ Ma’lumot bot orqali kiritildi."
     await send_group_message(msg)
 
 
@@ -1490,6 +1520,8 @@ async def finalize_doc_action(m, chat_id):
 
 async def finalize_manual_action(m, chat_id):
     save_history(data[chat_id])
+    if data[chat_id].get("type") == SICK_LEAVE_TYPE:
+        await notify_sick_created(data[chat_id])
     data[chat_id].pop("ignore_overlap", None)
     data[chat_id].pop("pending_action", None)
     state[chat_id] = "menu"
@@ -1498,10 +1530,11 @@ async def finalize_manual_action(m, chat_id):
 
 async def finalize_sick_action(m, chat_id):
     save_history(data[chat_id])
+    await notify_sick_created(data[chat_id])
     data[chat_id].pop("ignore_overlap", None)
     data[chat_id].pop("pending_action", None)
     state[chat_id] = "menu"
-    await m.answer("Больничный сохранен в историю.", reply_markup=menu)
+    await m.answer("Больничный сохранен в историю и отправлен в группу ✅", reply_markup=menu)
 
 
 def find_trip_overlaps(d):
@@ -2273,7 +2306,7 @@ async def handler(m: Message):
             await m.answer("Сотрудник не найден. Напиши другую часть ФИО.")
             return
         if len(found) == 1:
-            data[chat_id] = {"fio": found[0], "type": SICK_LEAVE_TYPE, "pos": ""}
+            data[chat_id] = {"fio": found[0], "type": SICK_LEAVE_TYPE, "pos": clean_position_for_profile(get_position_from_salary(found[0]))}
             state[chat_id] = "sick_project"
             await m.answer(f"Активный больничный по сотруднику {found[0]} не найден.\nСоздаем новую запись больничного. Напиши название проекта")
             return
@@ -2293,7 +2326,7 @@ async def handler(m: Message):
             state[chat_id] = "sick_extend_start_date"
             await m.answer(f"✅ Найдена активная запись больничного:\n\n👤 {old_record.get('fio')}\nПроект: {old_record.get('project', '')}\nС: {old_record.get('start')} по {old_record.get('end')}\nДней: {old_record.get('days')}\nВыход: {old_record.get('return_date')}\n\nТеперь введи дату, С КОТОРОЙ продлеваем больничный: ДД.ММ.ГГГГ")
             return
-        data[chat_id] = {"fio": text, "type": SICK_LEAVE_TYPE, "pos": ""}
+        data[chat_id] = {"fio": text, "type": SICK_LEAVE_TYPE, "pos": clean_position_for_profile(get_position_from_salary(text))}
         state[chat_id] = "sick_project"
         await m.answer("Активный больничный не найден. Создаем новую запись. Напиши название проекта")
         return
@@ -2419,14 +2452,32 @@ async def handler(m: Message):
             return
         data[chat_id] = {"fio": text}
         state[chat_id] = "type"
-        await m.answer("Выбери тип заявления:", reply_markup=make_keyboard(list(TEMPLATES.keys()) + ["🏠 Старт"], cols=2))
+        await m.answer("Выбери тип заявления:", reply_markup=make_keyboard(list(TEMPLATES.keys()) + [SICK_LEAVE_TYPE, "🏠 Старт"], cols=2))
         return
 
     if state.get(chat_id) == "type":
-        if text not in TEMPLATES:
+        if text not in TEMPLATES and text != SICK_LEAVE_TYPE:
             await m.answer("Выбери тип заявления из списка.")
             return
         data[chat_id]["type"] = text
+
+        if text == SICK_LEAVE_TYPE:
+            active = find_active_sick_records_by_fio(data[chat_id].get("fio"))
+            if active:
+                old_record = active[0]
+                data[chat_id] = {"fio": old_record.get("fio"), "type": SICK_LEAVE_TYPE, "old_sick_record": old_record}
+                state[chat_id] = "sick_extend_start_date"
+                await m.answer(f"✅ Найдена активная запись больничного:\n\n👤 {old_record.get('fio')}\nПроект: {old_record.get('project', '')}\nС: {old_record.get('start')} по {old_record.get('end')}\nДней: {old_record.get('days')}\nВыход: {old_record.get('return_date')}\n\nТеперь введи дату, С КОТОРОЙ продлеваем больничный: ДД.ММ.ГГГГ")
+                return
+            data[chat_id] = {
+                "fio": data[chat_id].get("fio"),
+                "type": SICK_LEAVE_TYPE,
+                "pos": clean_position_for_profile(get_position_from_salary(data[chat_id].get("fio"))),
+            }
+            state[chat_id] = "sick_project"
+            await m.answer("Активный больничный не найден. Создаем новую запись больничного. Напиши название проекта")
+            return
+
         if text == "🧩 Часть отпуска":
             previous = find_previous_part_leave_records_by_fio(data[chat_id].get("fio"))
             if previous:
