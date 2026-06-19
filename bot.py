@@ -63,6 +63,7 @@ TEMPLATES = {
     "📅 БС на один день": "templates/bs_one.docx",
     "💍 Мат помощь (свадьба)": "templates/mat_wedding.docx",
     "👶 Мат помощь (ребенок)": "templates/mat_child.docx",
+    "🕊 Мат помощь (смерть родственника)": "templates/mat_death.docx",
 }
 
 TRIP_REPORT_TEMPLATE = "templates/trip/business_trip_report.docx"
@@ -78,7 +79,17 @@ BS_RANGE_TYPE = "📝 БС с периода по период"
 # По ним бот НЕ должен отправлять сообщения в группу,
 # НЕ должен отправлять напоминания о начале/выходе на работу
 # и НЕ должен давать менять дату выхода через историю.
-MATERIAL_ASSISTANCE_TYPES = ["💍 Мат помощь (свадьба)", "👶 Мат помощь (ребенок)"]
+MATERIAL_ASSISTANCE_TYPES = [
+    "💍 Мат помощь (свадьба)",
+    "👶 Мат помощь (ребенок)",
+    "🕊 Мат помощь (смерть родственника)",
+]
+
+# Эти виды матпомощи не требуют ввода даты периода: в документе ставится сегодняшняя дата.
+MATERIAL_ASSISTANCE_NO_DATE_TYPES = [
+    "👶 Мат помощь (ребенок)",
+    "🕊 Мат помощь (смерть родственника)",
+]
 
 MANUAL_TYPES = [
     "🌴 Полный отпуск",
@@ -370,7 +381,7 @@ def type_uz(t):
         return "O‘quv ta’tili"
     if t == "🏥 Больничный":
         return "Kasallik ta’tili"
-    if t in ["💍 Мат помощь (свадьба)", "👶 Мат помощь (ребенок)"]:
+    if t in MATERIAL_ASSISTANCE_TYPES:
         return "Moddiy yordam"
     return t
 
@@ -390,7 +401,7 @@ def start_phrase_uz(t):
 
 
 def is_material_assistance(record_or_type):
-    """True для заявлений на матпомощь: свадьба/рождение ребенка."""
+    """True для заявлений на матпомощь: свадьба/рождение ребенка/смерть родственника."""
     if isinstance(record_or_type, dict):
         record_type = record_or_type.get("type", "")
     else:
@@ -764,7 +775,7 @@ def normalize_history_record(record):
     else:
         fixed["days"] = str(fixed.get("days", ""))
 
-    if fixed.get("type") == TRIP_TYPE:
+    if fixed.get("type") == TRIP_TYPE or is_material_assistance(fixed):
         fixed["return_date"] = ""
     elif fixed.get("end"):
         try:
@@ -834,7 +845,7 @@ def update_history_record(old_record, new_record):
 
 def save_history(d):
     return_date = ""
-    if d.get("end"):
+    if d.get("end") and not is_material_assistance(d):
         return_date = get_return_to_work_date(d["end"])
     record = {
         "fio": d.get("fio"),
@@ -1529,8 +1540,8 @@ async def finalize_doc_action(m, chat_id):
     path = finish_and_send(chat_id)
     await m.answer_document(FSInputFile(path))
 
-    # Матпомощь (свадьба/ребенок) не отправляем в группу:
-    # это не кадровое уведомление об отпуске/выходе на работу.
+    # Матпомощь (свадьба/ребенок/смерть родственника) не отправляем в группу:
+    # это только формирование документа и история, не кадровое уведомление.
     if not is_material_assistance(data[chat_id]):
         await notify_application_created(data[chat_id])
 
@@ -2536,7 +2547,7 @@ async def handler(m: Message):
                 state[chat_id] = "project"
                 await m.answer("Напиши название проекта")
                 return
-            if data[chat_id]["type"] == "👶 Мат помощь (ребенок)":
+            if data[chat_id]["type"] in MATERIAL_ASSISTANCE_NO_DATE_TYPES:
                 if await check_overlap_or_continue(m, chat_id, "doc"):
                     await finalize_doc_action(m, chat_id)
                 return
@@ -2561,7 +2572,7 @@ async def handler(m: Message):
 
     if state.get(chat_id) == "project":
         data[chat_id]["project"] = text
-        if data[chat_id]["type"] == "👶 Мат помощь (ребенок)":
+        if data[chat_id]["type"] in MATERIAL_ASSISTANCE_NO_DATE_TYPES:
             if await check_overlap_or_continue(m, chat_id, "doc"):
                 await finalize_doc_action(m, chat_id)
             return
