@@ -74,6 +74,12 @@ SICK_LEAVE_TYPE = "🏥 Больничный"
 BS_LEAVE_TYPES = ["📝 БС с периода по период", "📅 БС на один день"]
 BS_RANGE_TYPE = "📝 БС с периода по период"
 
+# Эти заявления нужны только для формирования документа и истории.
+# По ним бот НЕ должен отправлять сообщения в группу,
+# НЕ должен отправлять напоминания о начале/выходе на работу
+# и НЕ должен давать менять дату выхода через историю.
+MATERIAL_ASSISTANCE_TYPES = ["💍 Мат помощь (свадьба)", "👶 Мат помощь (ребенок)"]
+
 MANUAL_TYPES = [
     "🌴 Полный отпуск",
     "🧩 Часть отпуска",
@@ -381,6 +387,15 @@ def start_phrase_uz(t):
     if t == "🏥 Больничный":
         return "kasallik ta’tiliga chiqadi"
     return "ta’tilga chiqadi"
+
+
+def is_material_assistance(record_or_type):
+    """True для заявлений на матпомощь: свадьба/рождение ребенка."""
+    if isinstance(record_or_type, dict):
+        record_type = record_or_type.get("type", "")
+    else:
+        record_type = record_or_type
+    return record_type in MATERIAL_ASSISTANCE_TYPES
 
 
 
@@ -1153,6 +1168,8 @@ def build_report():
     for r in history:
         if not isinstance(r, dict):
             continue
+        if is_material_assistance(r):
+            continue
         if not is_active_record(r, today):
             continue
 
@@ -1220,7 +1237,7 @@ async def reminder_loop():
                 for r in history:
                     if not isinstance(r, dict):
                         continue
-                    if r.get("type") == TRIP_TYPE:
+                    if r.get("type") == TRIP_TYPE or is_material_assistance(r):
                         continue
                     if normalize_date(r.get("start", "")) == tomorrow_date:
                         key = f"start_{now_date}_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
@@ -1249,7 +1266,7 @@ async def reminder_loop():
                 for r in history:
                     if not isinstance(r, dict):
                         continue
-                    if r.get("type") == TRIP_TYPE:
+                    if r.get("type") == TRIP_TYPE or is_material_assistance(r):
                         continue
 
                     # ВТОРОЕ ИСПРАВЛЕНИЕ: сравниваем нормализованную дату выхода.
@@ -1333,7 +1350,7 @@ def format_leave_records_for_message(records):
 def can_change_return_date(record):
     if not isinstance(record, dict):
         return False
-    if record.get("type") == TRIP_TYPE:
+    if record.get("type") == TRIP_TYPE or is_material_assistance(record):
         return False
     return bool(record.get("return_date"))
 
@@ -1511,7 +1528,12 @@ async def check_overlap_or_continue(m, chat_id, action_name):
 async def finalize_doc_action(m, chat_id):
     path = finish_and_send(chat_id)
     await m.answer_document(FSInputFile(path))
-    await notify_application_created(data[chat_id])
+
+    # Матпомощь (свадьба/ребенок) не отправляем в группу:
+    # это не кадровое уведомление об отпуске/выходе на работу.
+    if not is_material_assistance(data[chat_id]):
+        await notify_application_created(data[chat_id])
+
     data[chat_id].pop("ignore_overlap", None)
     data[chat_id].pop("pending_action", None)
     state[chat_id] = "menu"
