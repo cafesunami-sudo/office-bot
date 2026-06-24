@@ -1234,75 +1234,114 @@ def time_is_due(now_time, target_time):
 
 
 async def reminder_loop():
+    """
+    Экономный цикл напоминаний.
+
+    Раньше бот каждые 30 секунд читал history_records и sent_reminders из Neon.
+    Это быстро расходовало compute time в Neon.
+
+    Теперь бот НЕ дергает базу постоянно:
+    - в обычное время просто спит;
+    - базу читает только когда наступило время напоминаний;
+    - каждое окно напоминаний обрабатывает один раз за день;
+    - если бот перезапустился после нужного времени, он все равно проверит напоминания,
+      но снова не отправит дубли, потому что reserve_sent_reminder() проверяет sent_reminders.
+    """
     print("REMINDER LOOP STARTED")
+    processed_windows = set()
+
     while True:
+        sleep_seconds = 60
         try:
             now = now_dt()
             now_date = now.strftime("%d.%m.%Y")
             now_time = now.strftime("%H:%M")
             tomorrow_date = (now + timedelta(days=1)).strftime("%d.%m.%Y")
+
+            due_events = []
+
+            # Напоминание о начале отпуска/БС/учебного отпуска завтра.
+            # Проверяем только один раз в день после START_REMIND_TIME.
+            start_window_key = f"start_window_{now_date}_{START_REMIND_TIME}"
+            if time_is_due(now_time, START_REMIND_TIME) and start_window_key not in processed_windows:
+                due_events.append(("start", START_REMIND_TIME, start_window_key))
+
+            # Напоминание о выходе на работу сегодня.
+            # Проверяем один раз в день для каждого времени из REMIND_TIMES.
+            for remind_time in REMIND_TIMES:
+                return_window_key = f"return_window_{now_date}_{remind_time}"
+                if time_is_due(now_time, remind_time) and return_window_key not in processed_windows:
+                    due_events.append(("return", remind_time, return_window_key))
+
+            # Если сейчас нет нужного окна — не трогаем Neon.
+            if not due_events:
+                await asyncio.sleep(sleep_seconds)
+                continue
+
+            # ВАЖНО: базу читаем только здесь, когда реально есть что проверить.
             history = load_history()
             sent = set(load_sent_reminders())
 
-            if time_is_due(now_time, START_REMIND_TIME):
-                for r in history:
-                    if not isinstance(r, dict):
-                        continue
-                    if r.get("type") == TRIP_TYPE or is_material_assistance(r):
-                        continue
-                    if normalize_date(r.get("start", "")) == tomorrow_date:
-                        key = f"start_{now_date}_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
-                        if key in sent:
+            for event_type, remind_time, window_key in due_events:
+                if event_type == "start":
+                    for r in history:
+                        if not isinstance(r, dict):
                             continue
-                        if not reserve_sent_reminder(key):
+                        if r.get("type") == TRIP_TYPE or is_material_assistance(r):
+                            continue
+                        if normalize_date(r.get("start", "")) == tomorrow_date:
+                            key = f"start_{now_date}_{r.get('fio')}_{r.get('start')}_{r.get('type')}"
+                            if key in sent:
+                                continue
+                            if not reserve_sent_reminder(key):
+                                sent.add(key)
+                                continue
                             sent.add(key)
-                            continue
-                        sent.add(key)
-                        msg = (
-                            f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
-                            f"👤 Xodim: {group_value(r.get('fio'))}\n"
-                            f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
-                            f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
-                            f"📅 Muddat: {r.get('start')} — {r.get('end')}\n"
-                            f"⏳ Davomiyligi: {r.get('days')} kun\n"
-                            f"📌 Ishga chiqish sanasi: {normalize_date(r.get('return_date', ''))}\n\n"
-                            f"ℹ️ Xodim ertadan boshlab {start_phrase_uz(r.get('type'))}."
-                        )
-                        await send_group_message(msg)
-                        print("START REMINDER SENT:", key)
+                            msg = (
+                                f"🔔 ERTAGA TA’TIL BOSHLANADI\n\n"
+                                f"👤 Xodim: {group_value(r.get('fio'))}\n"
+                                f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
+                                f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
+                                f"📅 Muddat: {r.get('start')} — {r.get('end')}\n"
+                                f"⏳ Davomiyligi: {r.get('days')} kun\n"
+                                f"📌 Ishga chiqish sanasi: {normalize_date(r.get('return_date', ''))}\n\n"
+                                f"ℹ️ Xodim ertadan boshlab {start_phrase_uz(r.get('type'))}."
+                            )
+                            await send_group_message(msg)
+                            print("START REMINDER SENT:", key)
 
-            for remind_time in REMIND_TIMES:
-                if not time_is_due(now_time, remind_time):
-                    continue
-                for r in history:
-                    if not isinstance(r, dict):
-                        continue
-                    if r.get("type") == TRIP_TYPE or is_material_assistance(r):
-                        continue
-
-                    # ВТОРОЕ ИСПРАВЛЕНИЕ: сравниваем нормализованную дату выхода.
-                    # Если return_date записан как 4.05.2026 или 04.05.2026, всё равно отправит.
-                    if normalize_date(r.get("return_date", "")) == now_date:
-                        key = f"return_{now_date}_{remind_time}_{r.get('fio')}_{r.get('type')}"
-                        if key in sent:
+                elif event_type == "return":
+                    for r in history:
+                        if not isinstance(r, dict):
                             continue
-                        if not reserve_sent_reminder(key):
+                        if r.get("type") == TRIP_TYPE or is_material_assistance(r):
+                            continue
+
+                        if normalize_date(r.get("return_date", "")) == now_date:
+                            key = f"return_{now_date}_{remind_time}_{r.get('fio')}_{r.get('type')}"
+                            if key in sent:
+                                continue
+                            if not reserve_sent_reminder(key):
+                                sent.add(key)
+                                continue
                             sent.add(key)
-                            continue
-                        sent.add(key)
-                        msg = (
-                            f"✅ BUGUN ISHGA CHIQADI\n\n"
-                            f"👤 Xodim: {group_value(r.get('fio'))}\n"
-                            f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
-                            f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
-                            f"📅 Ishga chiqish sanasi: {normalize_date(r.get('return_date', ''))}\n\n"
-                            f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
-                        )
-                        await send_group_message(msg)
-                        print("RETURN REMINDER SENT:", key)
+                            msg = (
+                                f"✅ BUGUN ISHGA CHIQADI\n\n"
+                                f"👤 Xodim: {group_value(r.get('fio'))}\n"
+                                f"📌 Loyiha: {group_value(r.get('project', ''))}\n\n"
+                                f"📝 Ta’til turi: {type_uz(r.get('type'))}\n"
+                                f"📅 Ishga chiqish sanasi: {normalize_date(r.get('return_date', ''))}\n\n"
+                                f"ℹ️ Xodim bugundan ish faoliyatini davom ettiradi."
+                            )
+                            await send_group_message(msg)
+                            print("RETURN REMINDER SENT:", key)
+
+                processed_windows.add(window_key)
+
         except Exception as e:
             print("REMINDER LOOP ERROR:", e)
-        await asyncio.sleep(30)
+
+        await asyncio.sleep(sleep_seconds)
 
 
 menu = make_keyboard([
