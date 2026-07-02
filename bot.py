@@ -110,6 +110,30 @@ data = {}
 state = {}
 temp_search = {}
 
+# ================== КЭШ ДЛЯ СКОРОСТИ ==================
+# После ECO-режима Neon может "засыпать". Если каждый шаг формы читает Neon
+# и заново открывает salary.docx, бот отвечает с задержкой 20-40 секунд.
+# Поэтому историю, напоминания и salary.docx держим в памяти процесса.
+HISTORY_CACHE = None
+SENT_REMINDERS_CACHE = None
+SALARY_RECORDS_CACHE = {
+    "mtime": None,
+    "records": None,
+}
+
+def reset_history_cache():
+    global HISTORY_CACHE
+    HISTORY_CACHE = None
+
+def reset_sent_reminders_cache():
+    global SENT_REMINDERS_CACHE
+    SENT_REMINDERS_CACHE = None
+
+def reset_salary_cache():
+    global SALARY_RECORDS_CACHE
+    SALARY_RECORDS_CACHE = {"mtime": None, "records": None}
+
+
 
 def make_keyboard(buttons, cols=2):
     keyboard = []
@@ -211,9 +235,16 @@ def save_sent_reminders_to_json(sent):
         json.dump(sent, f, ensure_ascii=False, indent=2)
 
 
+
 def load_sent_reminders():
+    global SENT_REMINDERS_CACHE
+
+    if SENT_REMINDERS_CACHE is not None:
+        return list(SENT_REMINDERS_CACHE)
+
     if not db_enabled():
-        return load_sent_reminders_from_json()
+        SENT_REMINDERS_CACHE = load_sent_reminders_from_json()
+        return list(SENT_REMINDERS_CACHE)
 
     conn = None
     try:
@@ -222,25 +253,33 @@ def load_sent_reminders():
         cur.execute("SELECT key FROM sent_reminders")
         rows = cur.fetchall()
         cur.close()
-        return [row[0] for row in rows]
+        SENT_REMINDERS_CACHE = [row[0] for row in rows]
+        return list(SENT_REMINDERS_CACHE)
     except Exception as e:
         print("POSTGRES LOAD SENT REMINDERS ERROR:", e)
-        return load_sent_reminders_from_json()
+        SENT_REMINDERS_CACHE = load_sent_reminders_from_json()
+        return list(SENT_REMINDERS_CACHE)
     finally:
         if conn:
             conn.close()
 
 
 def save_sent_reminder(key):
+    global SENT_REMINDERS_CACHE
+
     key = str(key or "").strip()
     if not key:
         return
+
+    if SENT_REMINDERS_CACHE is not None and key not in SENT_REMINDERS_CACHE:
+        SENT_REMINDERS_CACHE.append(key)
 
     if not db_enabled():
         sent = load_sent_reminders_from_json()
         if key not in sent:
             sent.append(key)
             save_sent_reminders_to_json(sent)
+        SENT_REMINDERS_CACHE = sent
         return
 
     conn = None
@@ -256,12 +295,15 @@ def save_sent_reminder(key):
         if key not in sent:
             sent.append(key)
             save_sent_reminders_to_json(sent)
+        SENT_REMINDERS_CACHE = sent
     finally:
         if conn:
             conn.close()
 
 
 def reserve_sent_reminder(key):
+    global SENT_REMINDERS_CACHE
+
     """
     Ставит ключ отправки ДО отправки сообщения.
     Это защищает от дублей после deploy/restart:
@@ -274,9 +316,11 @@ def reserve_sent_reminder(key):
     if not db_enabled():
         sent = load_sent_reminders_from_json()
         if key in sent:
+            SENT_REMINDERS_CACHE = sent
             return False
         sent.append(key)
         save_sent_reminders_to_json(sent)
+        SENT_REMINDERS_CACHE = sent
         return True
 
     conn = None
@@ -290,21 +334,27 @@ def reserve_sent_reminder(key):
         inserted = cur.fetchone()
         conn.commit()
         cur.close()
-        return inserted is not None
+
+        if inserted is not None:
+            if SENT_REMINDERS_CACHE is None:
+                SENT_REMINDERS_CACHE = []
+            if key not in SENT_REMINDERS_CACHE:
+                SENT_REMINDERS_CACHE.append(key)
+            return True
+        return False
     except Exception as e:
         print("POSTGRES RESERVE SENT REMINDER ERROR:", e)
         sent = load_sent_reminders_from_json()
         if key in sent:
+            SENT_REMINDERS_CACHE = sent
             return False
         sent.append(key)
         save_sent_reminders_to_json(sent)
+        SENT_REMINDERS_CACHE = sent
         return True
     finally:
         if conn:
             conn.close()
-
-
-
 
 def migrate_json_reminders_to_postgres():
     if not db_enabled():
@@ -591,9 +641,16 @@ def save_history_to_json(history):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 
+
 def load_history():
+    global HISTORY_CACHE
+
+    if HISTORY_CACHE is not None:
+        return [dict(r) for r in HISTORY_CACHE if isinstance(r, dict)]
+
     if not db_enabled():
-        return load_history_from_json()
+        HISTORY_CACHE = load_history_from_json()
+        return [dict(r) for r in HISTORY_CACHE if isinstance(r, dict)]
 
     conn = None
     try:
@@ -602,18 +659,25 @@ def load_history():
         cur.execute("SELECT data FROM history_records ORDER BY id ASC")
         rows = cur.fetchall()
         cur.close()
-        return [row[0] for row in rows if isinstance(row[0], dict)]
+        HISTORY_CACHE = [row[0] for row in rows if isinstance(row[0], dict)]
+        return [dict(r) for r in HISTORY_CACHE]
     except Exception as e:
         print("POSTGRES LOAD HISTORY ERROR:", e)
-        return load_history_from_json()
+        HISTORY_CACHE = load_history_from_json()
+        return [dict(r) for r in HISTORY_CACHE if isinstance(r, dict)]
     finally:
         if conn:
             conn.close()
 
 
 def save_history_full(history):
+    global HISTORY_CACHE
+
+    clean_history = [dict(r) for r in history if isinstance(r, dict)]
+    HISTORY_CACHE = clean_history
+
     if not db_enabled():
-        save_history_to_json(history)
+        save_history_to_json(clean_history)
         return
 
     conn = None
@@ -621,20 +685,28 @@ def save_history_full(history):
         conn = get_db_conn()
         cur = conn.cursor()
         cur.execute("DELETE FROM history_records")
-        for record in history:
-            if isinstance(record, dict):
-                cur.execute("INSERT INTO history_records (data) VALUES (%s)", (Json(record),))
+        for record in clean_history:
+            cur.execute("INSERT INTO history_records (data) VALUES (%s)", (Json(record),))
         conn.commit()
         cur.close()
     except Exception as e:
         print("POSTGRES SAVE HISTORY FULL ERROR:", e)
-        save_history_to_json(history)
+        save_history_to_json(clean_history)
     finally:
         if conn:
             conn.close()
 
 
 def append_history_record(record):
+    global HISTORY_CACHE
+
+    if not isinstance(record, dict):
+        return
+
+    if HISTORY_CACHE is None:
+        HISTORY_CACHE = load_history()
+    HISTORY_CACHE.append(dict(record))
+
     if not db_enabled():
         history = load_history_from_json()
         history.append(record)
@@ -656,7 +728,6 @@ def append_history_record(record):
     finally:
         if conn:
             conn.close()
-
 
 def migrate_json_history_to_postgres():
     if not db_enabled():
@@ -1736,9 +1807,25 @@ def normalize_salary_number(value):
         return text
 
 
+
 def load_salary_records():
+    global SALARY_RECORDS_CACHE
+
     if not os.path.exists(SALARY_FILE):
+        SALARY_RECORDS_CACHE = {"mtime": None, "records": []}
         return []
+
+    try:
+        current_mtime = os.path.getmtime(SALARY_FILE)
+    except Exception:
+        current_mtime = None
+
+    if (
+        SALARY_RECORDS_CACHE.get("records") is not None
+        and SALARY_RECORDS_CACHE.get("mtime") == current_mtime
+    ):
+        return [dict(r) for r in SALARY_RECORDS_CACHE.get("records", [])]
+
     try:
         doc = Document(SALARY_FILE)
         records = []
@@ -1761,7 +1848,8 @@ def load_salary_records():
                 })
 
         if records:
-            return records
+            SALARY_RECORDS_CACHE = {"mtime": current_mtime, "records": records}
+            return [dict(r) for r in records]
 
         # Резервный вариант: если файл будет не таблицей, а обычным текстом
         # в формате: номер / ФИО / должность / сумма.
@@ -1781,11 +1869,13 @@ def load_salary_records():
                 i += 4
             else:
                 i += 1
-        return records
+
+        SALARY_RECORDS_CACHE = {"mtime": current_mtime, "records": records}
+        return [dict(r) for r in records]
     except Exception as e:
         print("SALARY FILE READ ERROR:", e)
+        SALARY_RECORDS_CACHE = {"mtime": current_mtime, "records": []}
         return []
-
 
 def search_salary_records_by_text(text):
     q = str(text or "").lower().strip()
@@ -2846,6 +2936,9 @@ async def on_startup(app):
     migrate_json_history_to_postgres()
     migrate_json_reminders_to_postgres()
     normalize_history_file()
+    load_salary_records()
+    load_sent_reminders()
+    print("CACHE READY: history, salary, reminders загружены")
     webhook_full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(webhook_full_url, secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
