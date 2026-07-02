@@ -63,6 +63,7 @@ TEMPLATES = {
     "📅 БС на один день": "templates/bs_one.docx",
     "💍 Мат помощь (свадьба)": "templates/mat_wedding.docx",
     "👶 Мат помощь (ребенок)": "templates/mat_child.docx",
+    "👶 Мат помощь (ребенок + 3 дня)": "templates/mat_child_3_days.docx",
     "🕊 Мат помощь (смерть родственника)": "templates/mat_death.docx",
 }
 
@@ -82,12 +83,14 @@ BS_RANGE_TYPE = "📝 БС с периода по период"
 MATERIAL_ASSISTANCE_TYPES = [
     "💍 Мат помощь (свадьба)",
     "👶 Мат помощь (ребенок)",
+    "👶 Мат помощь (ребенок + 3 дня)",
     "🕊 Мат помощь (смерть родственника)",
 ]
 
 # Эти виды матпомощи не требуют ввода даты периода: в документе ставится сегодняшняя дата.
 MATERIAL_ASSISTANCE_NO_DATE_TYPES = [
     "👶 Мат помощь (ребенок)",
+    "👶 Мат помощь (ребенок + 3 дня)",
     "🕊 Мат помощь (смерть родственника)",
 ]
 
@@ -2650,7 +2653,7 @@ async def handler(m: Message):
             if await check_overlap_or_continue(m, chat_id, "doc"):
                 await finalize_doc_action(m, chat_id)
             return
-        if doc_type == "💍 Мат помощь (свадьба)":
+        if doc_type in ["💍 Мат помощь (свадьба)", "👶 Мат помощь (ребенок + 3 дня)"]:
             days = 3
             data[chat_id]["days"] = str(days)
             data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
