@@ -75,6 +75,7 @@ TRIP_REGION_SUFFIX = "подразделения по Хорезмской об�
 SICK_LEAVE_TYPE = "🏥 Больничный"
 BS_LEAVE_TYPES = ["📝 БС с периода по период", "📅 БС на один день"]
 BS_RANGE_TYPE = "📝 БС с периода по период"
+CHILD_BIRTH_3_DAYS_TYPE = "👶 Мат помощь (ребенок + 3 дня)"
 
 # Эти заявления нужны только для формирования документа и истории.
 # По ним бот НЕ должен отправлять сообщения в группу,
@@ -83,14 +84,12 @@ BS_RANGE_TYPE = "📝 БС с периода по период"
 MATERIAL_ASSISTANCE_TYPES = [
     "💍 Мат помощь (свадьба)",
     "👶 Мат помощь (ребенок)",
-    "👶 Мат помощь (ребенок + 3 дня)",
     "🕊 Мат помощь (смерть родственника)",
 ]
 
 # Эти виды матпомощи не требуют ввода даты периода: в документе ставится сегодняшняя дата.
 MATERIAL_ASSISTANCE_NO_DATE_TYPES = [
     "👶 Мат помощь (ребенок)",
-    "👶 Мат помощь (ребенок + 3 дня)",
     "🕊 Мат помощь (смерть родственника)",
 ]
 
@@ -384,6 +383,8 @@ def type_uz(t):
         return "O‘quv ta’tili"
     if t == "🏥 Больничный":
         return "Kasallik ta’tili"
+    if t == CHILD_BIRTH_3_DAYS_TYPE:
+        return "Moddiy yordam va 3 kunlik ta’til"
     if t in MATERIAL_ASSISTANCE_TYPES:
         return "Moddiy yordam"
     return t
@@ -400,6 +401,8 @@ def start_phrase_uz(t):
         return "o‘quv ta’tiliga chiqadi"
     if t == "🏥 Больничный":
         return "kasallik ta’tiliga chiqadi"
+    if t == CHILD_BIRTH_3_DAYS_TYPE:
+        return "3 kunlik ta’tilga chiqadi"
     return "ta’tilga chiqadi"
 
 
@@ -890,10 +893,15 @@ def replace_text(doc, rep):
 
 def create_doc(d):
     doc = Document(TEMPLATES[d["type"]])
+    project_value = d.get("project", "")
+    # В новом заявлении на рождение ребенка + 3 дня поле "Отдел" в Word оставляем пустым.
+    # Проект нужен боту для истории/сообщения в группу, но в самом документе его не пишем.
+    if d.get("type") == CHILD_BIRTH_3_DAYS_TYPE:
+        project_value = ""
     rep = {
         "{{FIO}}": format_fio_short(d["fio"]),
         "{{POSITION}}": d.get("pos", ""),
-        "{{PROJECT}}": d.get("project", ""),
+        "{{PROJECT}}": project_value,
         "{{TODAY}}": format_date_text_without_year_word(now_dt().strftime("%d.%m.%Y")),
     }
     if "start" in d and "end" in d:
@@ -1188,7 +1196,7 @@ def build_report():
             continue
 
         t = r.get("type", "")
-        if t in ["🌴 Полный отпуск", "🧩 Часть отпуска", "📌 Оставшийся отпуск"]:
+        if t in ["🌴 Полный отпуск", "🧩 Часть отпуска", "📌 Оставшийся отпуск", CHILD_BIRTH_3_DAYS_TYPE]:
             groups["🌴 В отпуске"].append(r)
         elif t in ["📝 БС с периода по период", "📅 БС на один день"]:
             groups["📝 В БС"].append(r)
@@ -1534,7 +1542,7 @@ def find_date_overlaps(fio, start_text, end_text):
         if r.get("type") not in [
             "🌴 Полный отпуск", "🧩 Часть отпуска", "📌 Оставшийся отпуск",
             "📚 Учебный отпуск", "📝 БС с периода по период", "📅 БС на один день",
-            SICK_LEAVE_TYPE, TRIP_TYPE,
+            SICK_LEAVE_TYPE, CHILD_BIRTH_3_DAYS_TYPE, TRIP_TYPE,
         ]:
             continue
         periods = get_periods_from_record(r)
@@ -2653,7 +2661,7 @@ async def handler(m: Message):
             if await check_overlap_or_continue(m, chat_id, "doc"):
                 await finalize_doc_action(m, chat_id)
             return
-        if doc_type in ["💍 Мат помощь (свадьба)", "👶 Мат помощь (ребенок + 3 дня)"]:
+        if doc_type in ["💍 Мат помощь (свадьба)", CHILD_BIRTH_3_DAYS_TYPE]:
             days = 3
             data[chat_id]["days"] = str(days)
             data[chat_id]["end"] = (start_date + timedelta(days=days - 1)).strftime("%d.%m.%Y")
